@@ -89,7 +89,7 @@ def test_fetch_text_failure() -> None:
 
 
 def test_post_comment(mocker: MockerFixture) -> None:
-    mock_run = mocker.patch("llm_investigate.subprocess.run")
+    mock_run = mocker.patch("investigate_common.subprocess.run")
     llm_investigate.post_comment("http://base", "123", "test comment")
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]

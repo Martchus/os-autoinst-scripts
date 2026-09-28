@@ -1,194 +1,46 @@
 #!/usr/bin/python3
 # Copyright SUSE LLC
-# ruff: file-ignore[any-type, blind-except, complex-structure, line-too-long, future-required-type-annotation, boolean-type-hint-positional-argument, reimplemented-operator, too-many-arguments, too-many-locals, too-many-statements, too-many-positional-arguments, magic-value-comparison, print, error-instead-of-exception]
+# ruff: file-ignore[blind-except, complex-structure, line-too-long, future-required-type-annotation, boolean-type-hint-positional-argument, reimplemented-operator, too-many-arguments, too-many-locals, too-many-statements, too-many-positional-arguments, print, error-instead-of-exception]
 """Investigates an openQA job failure using an LLM."""
 
-import datetime
 import json
 import logging
 import os
-import pathlib
-import subprocess
 import sys
-from collections import deque
-from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlparse, urlunparse
 
 import httpx
-import tenacity
 import typer
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from investigate_common import (
+    DEFAULT_HTTP_TIMEOUT as DEFAULT_OPENQA_TIMEOUT,
+)
+from investigate_common import (
+    DEFAULT_INVESTIGATION_TIMEOUT,
+    RetryTransport,
+    fetch_json,
+    fetch_text,
+    setup_logging,
+)
+from investigate_common import (
+    parse_job_url_and_base as parse_job_url,
+)
+from investigate_common import (
+    post_comment as common_post_comment,
+)
+
 USER_AGENT = "openqa-llm-investigate (https://github.com/os-autoinst/os-autoinst-scripts)"
-DEFAULT_OPENQA_TIMEOUT: float = 90.0
-DEFAULT_INVESTIGATION_TIMEOUT: float = 120.0
 
 log = logging.getLogger(__name__)
-
-
-class TransientHTTPError(Exception):
-    """Exception raised for HTTP responses with transient status codes."""
-
-    def __init__(self, response: httpx.Response) -> None:
-        """Initialize the exception with the HTTP response."""
-        super().__init__(f"HTTP {response.status_code}")
-        self.response = response
-
-
-class RetryTransport(httpx.HTTPTransport):
-    """Custom HTTP transport that retries on transient errors (e.g. 429, 5xx)."""
-
-    RETRY_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
-
-    def __init__(self, retries: int = 1, **kwargs: Any) -> None:
-        """Initialize the RetryTransport with a configurable number of retries."""
-        super().__init__(**kwargs)
-        self.retries = retries
-
-    @staticmethod
-    def _now() -> datetime.datetime:
-        return datetime.datetime.now(datetime.timezone.utc)
-
-    def _check_and_raise(self, response: httpx.Response) -> None:
-        if response.status_code in self.RETRY_STATUS_CODES:
-            raise TransientHTTPError(response)
-
-    def _wait_strategy(self, retry_state: tenacity.RetryCallState) -> float:
-        exc = retry_state.outcome.exception()
-        if not isinstance(exc, TransientHTTPError):
-            return 0.0
-        response = exc.response
-        retry_after = response.headers.get("Retry-After")
-        delay = 0.0
-        if retry_after:
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                try:
-                    dt = parsedate_to_datetime(retry_after)
-                    delay = (dt - self._now()).total_seconds()
-                except Exception as e:
-                    log.debug("Failed to parse Retry-After header as date: %s", e)
-
-        if delay <= 0.0:
-            delay = float(2 ** (retry_state.attempt_number - 1))
-
-        return delay
-
-    def _before_sleep(self, retry_state: tenacity.RetryCallState) -> None:
-        exc = retry_state.outcome.exception()
-        if isinstance(exc, TransientHTTPError):
-            response = exc.response
-            response.close()
-
-            retries_left = self.retries - retry_state.attempt_number
-            delay = retry_state.next_action.sleep
-
-            log.warning(
-                "Received HTTP %d. Retrying in %.2f seconds (%d retries left)...",
-                response.status_code,
-                delay,
-                retries_left,
-            )
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """Handle the HTTP request, retrying on transient status codes if retries are available."""
-        try:
-            for attempt in tenacity.Retrying(
-                retry=tenacity.retry_if_exception_type(TransientHTTPError),
-                stop=tenacity.stop_after_attempt(self.retries + 1),
-                wait=self._wait_strategy,
-                before_sleep=self._before_sleep,
-                reraise=True,
-            ):
-                with attempt:
-                    response = super().handle_request(request)
-                    self._check_and_raise(response)
-        except TransientHTTPError as e:
-            return e.response
-
-        return response
-
 
 app = typer.Typer(add_completion=False)
 
 
-def fetch_json(
-    client: httpx.Client,
-    url: str,
-    params: dict[str, Any] | None = None,
-    default: Any = None,
-    timeout: float | None = None,
-) -> Any:
-    try:
-        kwargs: dict[str, Any] = {"params": params}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        response = client.get(url, **kwargs)
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        log.warning("Failed to fetch JSON from %s with params %s: %s", url, params, e)
-        return default if default is not None else {}
-
-
-def fetch_text(client: httpx.Client, url: str, max_lines: int = 200, timeout: float | None = None) -> str:
-    lines: deque[str] = deque(maxlen=max_lines)
-    kwargs: dict[str, Any] = {}
-    if timeout is not None:
-        kwargs["timeout"] = timeout
-    try:
-        with client.stream("GET", url, **kwargs) as response:
-            response.raise_for_status()
-            for line in response.iter_lines():
-                lines.append(line)
-        return "\n".join(lines)
-    except Exception as e:
-        log.warning("Failed to fetch text from %s: %s", url, e)
-        return ""
-
-
 def post_comment(base_url: str, job_id: str, comment: str) -> None:
-    cmd = [
-        "openqa-cli",
-        "api",
-        "--header",
-        f"User-Agent: {USER_AGENT}",
-        "--host",
-        base_url,
-        "-X",
-        "POST",
-        f"jobs/{job_id}/comments",
-        f"text={comment}",
-    ]
-    try:
-        res = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        log.debug("Posted comment to %s/t%s: %s", base_url, job_id, res.stdout)
-    except subprocess.CalledProcessError as e:
-        log.error("Failed to post comment: %s", e.stderr)
-
-
-def setup_logging(verbose: int, quiet: bool) -> None:
-    if quiet:
-        level = logging.ERROR
-    elif verbose >= 2:
-        level = logging.DEBUG
-    elif verbose >= 1:
-        level = logging.INFO
-    else:
-        level = logging.WARNING
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s", stream=sys.stderr, force=True)
-
-
-def parse_job_url(job_url: str) -> tuple[str, str]:
-    parsed_url = urlparse(job_url)
-    if parsed_url.scheme:
-        base_url = urlunparse((parsed_url.scheme, parsed_url.netloc, "", "", "", ""))
-        job_id = parsed_url.path.replace("/tests/", "", 1)
-    else:
-        base_url = os.environ.get("OPENQA_URL", "https://openqa.opensuse.org")
-        job_id = job_url
-    return base_url, job_id
+    common_post_comment(base_url, job_id, comment, user_agent=USER_AGENT)
 
 
 def _shares_failed_modules(other_job: dict[str, Any], target_modules: set[str]) -> bool:
@@ -361,7 +213,7 @@ Provide exactly 3 sentences answering:
 
     if prompt_template_file:
         try:
-            prompt_template = pathlib.Path(prompt_template_file).read_text(encoding="utf-8")
+            prompt_template = Path(prompt_template_file).read_text(encoding="utf-8")
         except OSError as e:
             log.error("Could not read prompt template file %s: %s", prompt_template_file, e)
             sys.exit(1)

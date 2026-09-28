@@ -11,28 +11,25 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlparse
 
 import httpx
 import typer
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from investigate_common import (
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_INVESTIGATION_TIMEOUT,
+    parse_job_url,
+    setup_logging,
+)
+
 HTTP_NOT_FOUND = 404
 USER_AGENT = "openqa-investigate (https://github.com/os-autoinst/os-autoinst-scripts)"
-DEFAULT_HTTP_TIMEOUT: float = 90.0
-DEFAULT_INVESTIGATION_TIMEOUT: float = 120.0
 
 log = logging.getLogger("openqa-investigate")
-
-
-def setup_logging(verbose: int) -> None:
-    level_map = {
-        0: logging.WARNING,
-        1: logging.INFO,
-        2: logging.DEBUG,
-    }
-    level = level_map.get(min(verbose, 2), logging.WARNING)
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s", stream=sys.stderr, force=True)
 
 
 class OpenQAClient:
@@ -230,28 +227,6 @@ def clone_job(
     if isinstance(res_json, dict):
         return res_json
     return {"raw_output": stdout}
-
-
-def parse_job_url(job_url: str, _default_scheme: str, _default_host: str) -> tuple[int, str, str]:
-    parsed = urlparse(job_url)
-    if parsed.scheme and parsed.netloc:
-        scheme = parsed.scheme
-        host = parsed.netloc
-        path_parts = [p for p in parsed.path.strip("/").split("/") if p]
-        if not path_parts:
-            msg = f"Could not extract job ID from URL path: {parsed.path}"
-            raise ValueError(msg)
-        job_str = path_parts[-1]
-        if job_str.startswith("t") and job_str[1:].isdigit():
-            job_id = int(job_str[1:])
-        elif job_str.isdigit():
-            job_id = int(job_str)
-        else:
-            msg = f"Could not extract numeric job ID from URL path component: {job_str}"
-            raise ValueError(msg)
-        return job_id, scheme, host
-    msg = f"Invalid job URL: {job_url}"
-    raise ValueError(msg)
 
 
 def get_cluster_jobs(dep_data: dict[str, Any], job_id: int) -> set[int]:
