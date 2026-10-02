@@ -10,6 +10,7 @@ import importlib.util
 import logging
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 from typing import TYPE_CHECKING, Any
@@ -257,6 +258,67 @@ def test_fetch_lfs_objects_batching(mocker: MockerFixture) -> None:
     assert calls[3] == ["git", "lfs", "fetch", "parent", *fake_commits[50:100]]
     assert calls[4] == ["git", "lfs", "fetch", "parent", *fake_commits[100:105]]
     assert len(calls) == 5
+
+
+def test_fetch_lfs_objects_real_git_repo(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that _fetch_lfs_objects downloads missing LFS objects in a real git repository."""
+    # Setup a "parent" Git repository with LFS and an initial commit
+    git_bin = shutil.which("git") or "/usr/bin/git"
+    parent_dir = tmp_path / "parent"
+    parent_dir.mkdir()
+    subprocess.run([git_bin, "init", "-b", "leap-16.0", str(parent_dir)], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "config", "user.name", "Test User"], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "lfs", "install", "--local"], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "lfs", "track", "*.obscpio"], check=True)
+    (parent_dir / "base.txt").write_text("base content\n", encoding="utf-8")
+    subprocess.run([git_bin, "-C", str(parent_dir), "add", ".gitattributes", "base.txt"], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "commit", "-m", "commit 1: initial"], check=True)
+
+    # Clone the "parent" Git repo into an "origin" repo and configure this as "origin" remote in the "parent" repo
+    origin_dir = tmp_path / "origin"
+    subprocess.run([git_bin, "clone", "--bare", str(parent_dir), str(origin_dir)], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "remote", "add", "origin", str(origin_dir)], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "push", "origin", "leap-16.0"], check=True)
+
+    # Commit 2 on parent: add intermediate LFS object
+    (parent_dir / "intermediate.obscpio").write_text("intermediate lfs content\n", encoding="utf-8")
+    subprocess.run([git_bin, "-C", str(parent_dir), "add", "intermediate.obscpio"], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "commit", "-m", "commit 2: add intermediate"], check=True)
+
+    # Commit 3 on parent: remove intermediate LFS object
+    subprocess.run([git_bin, "-C", str(parent_dir), "rm", "intermediate.obscpio"], check=True)
+    subprocess.run([git_bin, "-C", str(parent_dir), "commit", "-m", "commit 3: remove intermediate"], check=True)
+
+    # Clone "origin" repo to another repo "local" and setup LFS as well
+    local_dir = tmp_path / "local"
+    subprocess.run([git_bin, "clone", str(origin_dir), str(local_dir)], check=True)
+    subprocess.run([git_bin, "-C", str(local_dir), "config", "user.name", "Test User"], check=True)
+    subprocess.run([git_bin, "-C", str(local_dir), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run([git_bin, "-C", str(local_dir), "lfs", "install", "--local"], check=True)
+
+    # Fetch "parent" commits into "local" and switch to "parent/leap-16.0"
+    subprocess.run([git_bin, "-C", str(local_dir), "remote", "add", "parent", str(parent_dir)], check=True)
+    subprocess.run([git_bin, "-C", str(local_dir), "fetch", "parent"], check=True)
+    subprocess.run([git_bin, "-C", str(local_dir), "switch", "-C", "leap-16.0", "parent/leap-16.0"], check=True)
+
+    # Verify that pushing now fails because intermediate.obscpio from commit 2 is missing locally
+    push_res = subprocess.run(
+        [git_bin, "-C", str(local_dir), "push", "origin", "leap-16.0"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert push_res.returncode != 0
+    assert "intermediate.obscpio" in push_res.stdout + push_res.stderr
+
+    # Use _fetch_lfs_objects to fetch missing LFS objects from parent
+    monkeypatch.chdir(local_dir)
+    submitter = auto_submit.AutoSubmitter(git_cmd_str=git_bin, dry_run=False)
+    submitter._fetch_lfs_objects("leap-16.0")
+
+    # Verify that pushing succeeds after fetching missing LFS objects via _fetch_lfs_objects
+    subprocess.run([git_bin, "-C", str(local_dir), "push", "origin", "leap-16.0"], check=True)
 
 
 def test_copy_files_to_clone(
