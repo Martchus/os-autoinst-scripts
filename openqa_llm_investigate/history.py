@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from operator import itemgetter
 from urllib.parse import quote
 
-from .failures import build_module_cmd_list, extract_failed_modules
+from .failures import extract_failed_modules, failing_cluster, failing_command
 from .http import AnalyzerError, JsonDict, OpenQA
 from .text import redact
 
-_HEADER_SETTINGS = ("DISTRI", "VERSION", "FLAVOR", "ARCH", "BUILD", "MACHINE", "BACKEND")
+_HEADER_SETTINGS = ("MACHINE", "BACKEND")
 _HEADER_OPTIONAL = ("QEMURAM", "UEFI", "ENCRYPT", "BOOTFROM", "HDD_1", "BOOT_HDD_IMAGE")
 _HISTORY_FAILED = ("failed", "incomplete", "timeout_exceeded", "parallel_failed")
 _HISTORY_NEIGHBOURS = 5
@@ -63,7 +63,8 @@ def _failed_commands(oqa: OpenQA, job_id: int | str, limit: int = 2) -> list[str
     """Return the first failed commands of a job from its details (best-effort, [] on error)."""
     try:
         details = oqa.json(f"/tests/{job_id}/details_ajax")
-        cmds = [cmd for m in extract_failed_modules(details) for cmd, _ in build_module_cmd_list(m.get("details", []))]
+        found = [failing_cluster(m.get("details", [])) for m in extract_failed_modules(details)]
+        cmds = [fc[1] for c in found if c and (fc := failing_command(c[0]))]
     except (AnalyzerError, AttributeError, TypeError):
         return []
     cmds = [" ".join(c.split()) for c in cmds[:limit]]

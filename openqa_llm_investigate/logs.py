@@ -50,6 +50,7 @@ _KEY_RULES: list[tuple[re.Pattern[str], str]] = [
     )
 ]
 _JOB_LOG_SIGNAL_RE = re.compile(r"\[(?:warn|error)\]|!!!|\bdied\b|Unable to|Failed to|No such file")
+_EXIT_TOKEN_RE = re.compile(r"echo (\S+?)-\$\?-")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _JOB_LOG_MAX_LINES = 60
 _JOB_LOG_TAIL_LINES = 30
@@ -86,6 +87,13 @@ def format_log_context(context: LogContext) -> list[str]:
     return log_lines(context["before"]) + matched_line(context["matched"]) + log_lines(context["after"])
 
 
+def _match_index(lines: list[str], search_string: str) -> int | None:
+    """Return the index of the last line containing `search_string`, a `# ` command line first."""
+    matches = [i for i, ln in enumerate(lines) if search_string in ln]
+    commands = [i for i in matches if lines[i].strip().startswith("# ")]
+    return (commands or matches)[-1] if matches else None
+
+
 def find_in_log(
     log_content: str, search_string: str | None, context_lines_before: int = 10, context_lines_after: int | None = None
 ) -> LogContext | None:
@@ -94,16 +102,34 @@ def find_in_log(
         return None
     after = context_lines_before if context_lines_after is None else context_lines_after
     lines = log_content.split("\n")
-    matches = [i for i, ln in enumerate(lines) if search_string in ln]
-    if not matches:
+    if (idx := _match_index(lines, search_string)) is None:
         return None
-    commands = [i for i in matches if lines[i].strip().startswith("# ")]
-    idx = (commands or matches)[-1]
     return {
         "before": lines[max(0, idx - context_lines_before) : idx],
         "matched": lines[idx],
         "after": lines[idx + 1 : idx + after + 1],
     }
+
+
+def command_output(serial_log: str, command: str, max_lines: int) -> list[str]:
+    """Return the last `max_lines` output lines of `command` in a serial terminal log (empty if not found).
+
+    The output ends at the `TOKEN-N-` exit marker echoed after the command, else at the next wrapped command.
+    """
+    lines = serial_log.split("\n")
+    if (idx := _match_index(lines, command)) is None:
+        return []
+    token = _EXIT_TOKEN_RE.search(lines[idx])
+    end_re = re.compile(rf"^{re.escape(token.group(1))}-\d+-$") if token else None
+    output: list[str] = []
+    for raw in lines[idx + 1 :]:
+        line = ESC_RE.sub("", raw).rstrip()
+        if (end_re and end_re.match(line.strip())) or _EXIT_TOKEN_RE.search(line):
+            break
+        output.append(raw)
+    body = [ln for ln in log_lines(output) if ln.strip()]
+    omitted = len(body) - max_lines
+    return [f"... ({omitted} earlier output lines omitted)", *body[-max_lines:]] if omitted > 0 else body
 
 
 def _line_index(log_content: str, lines: list[str], marker: str | None) -> int | None:

@@ -7,7 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 from .text import (
-    ESC_RE,
+    has_command,
     parse_command_from_test_died,
     parse_command_from_text_data,
     parse_exit_code_from_text_data,
@@ -28,10 +28,10 @@ _TESTAPI_SCREEN_CALLS = frozenset({
     "wait_still_screen",
     "assert_still_screen",
 })
-_HOUSEKEEPING_CMD_RE = re.compile(r"^(?:scp\b|rm -rf\b|curl\b.*/uploadlog/|test -d \S+ && rm\b)")
+# os-autoinst fetches a script with `curl .../current_script > FILE` and then runs `clear`; a bare `clear` is no signal
+_TRANSFER_CMD_RE = re.compile(r"^(?:clear|curl -f -v \S+/current_script > \S+)$")
+_COMMAND_MARKERS = ("# Command:", "# wait_serial", "# Result:", "# Test died:")
 _REPEATS_SHOWN = 5
-CLUSTER_MAX = 5
-STEP_GROUP_MAX = 10
 CLUSTER_STEPS_SHOWN = 8
 
 
@@ -111,51 +111,94 @@ def _step_command(detail: JsonDict) -> tuple[str, str | None] | None:
     return (_screen_command(title, text_data), None) if title else None
 
 
-def build_module_cmd_list(
-    all_details: list[JsonDict], repeats: dict[str, list[int]] | None = None
-) -> list[tuple[str, str | None]]:
-    """Return (command, exit code) per distinct failing-step command, in first-seen order.
+def _failure_kind(step: JsonDict, cmd: str) -> str:
+    """Name what `cmd` of a failing step is: a needle check, a command, a wait_serial marker or a plain step."""
+    text = step.get("text_data") or ""
+    if cmd.startswith("no candidate needle"):
+        return "needle check"
+    if "# Test died:" in text or has_command(text):
+        return "command"
+    return "wait_serial marker" if step.get("display_title") == "wait_serial" else "step"
 
-    `repeats`, when given, is filled with command -> nums of every failing step it stands for.
+
+def failing_cluster(all_details: list[JsonDict]) -> tuple[list[JsonDict], list[int]] | None:
+    """Return the last failing cluster outside the post-fail hook, with the first nums of its earlier identical retries.
+
+    Only that cluster failed the module; the other failing steps were non-fatal.
     """
-    seen: set[str] = set()
-    entries: list[tuple[str, str | None]] = []
-    reps = repeats if repeats is not None else {}
-    for detail in all_details:
-        entry = _step_command(detail) if detail.get("result") == "fail" else None
-        if entry is None:
-            continue
-        reps.setdefault(entry[0], []).append(detail.get("num", 0))
-        if entry[0] not in seen:
-            seen.add(entry[0])
-            entries.append(entry)
-    return entries
+    post_start = post_fail_start(all_details)
+    clusters = [
+        c
+        for cl in group_failures_by_proximity(all_details)
+        if (c := [d for d in cl if not is_secondary(d, post_start)])
+    ]
+    collapsed = collapse_repeated_clusters(clusters)
+    return collapsed[-1] if collapsed else None
 
 
-def module_cmd_lines(all_details: list[JsonDict]) -> list[str]:
-    """Render `# Cmd[N]: COMMAND (exit CODE)` lines, with a repeat comment where a command recurs."""
-    repeats: dict[str, list[int]] = {}
-    lines = []
-    for n, (cmd, exit_code) in enumerate(build_module_cmd_list(all_details, repeats), start=1):
-        lines.append(f"# Cmd[{n}]: {cmd}" + (f" (exit {exit_code})" if exit_code is not None else ""))
-        if len(nums := repeats.get(cmd, [])) > 1:
-            shown = ", ".join(f"#{x}" for x in nums[:_REPEATS_SHOWN])
-            more = f" ... (+{len(nums) - _REPEATS_SHOWN})" if len(nums) > _REPEATS_SHOWN else ""
-            lines.append(f"# Cmd[{n}] repeated {len(nums)} times: {shown}{more}")
-    return lines
+def failing_command(cluster: list[JsonDict]) -> tuple[JsonDict, str, str | None] | None:
+    """Return the (step, command, exit code) that failed the module, None if its cluster has no command.
+
+    Starts at the last `# Test died:` step (else the last one) and walks back through the cluster.
+    """
+    died = [i for i, d in enumerate(cluster) if "# Test died:" in (d.get("text_data") or "")]
+    for step in reversed(cluster[: (died[-1] if died else len(cluster) - 1) + 1]):
+        entry = _step_command(step)
+        if entry is not None and not entry[0].startswith("(exit "):
+            return step, *entry
+    return None
+
+
+def failing_step(cluster: list[JsonDict]) -> JsonDict:
+    """Return the step to mark as the failure: the one with the failing command, else the last died/last step."""
+    if found := failing_command(cluster):
+        return found[0]
+    return next((d for d in reversed(cluster) if "# Test died:" in (d.get("text_data") or "")), cluster[-1])
+
+
+def failing_command_line(cluster: list[JsonDict]) -> str | None:
+    """Describe the command that failed the module (None if the cluster has none)."""
+    if not (found := failing_command(cluster)):
+        return None
+    step, cmd, exit_code = found
+    return f'The module has been failed by: "{cmd}" {_failure_kind(step, cmd)}' + (
+        f" (exit {exit_code})." if exit_code is not None else "."
+    )
 
 
 def is_noise_step(step: JsonDict) -> bool:
-    """Return True for passed steps with no information: upload/cleanup housekeeping, bare screenshots."""
-    if step.get("result") == "fail":
+    """Return True for passed steps with no information: os-autoinst's script transfer, polls, bare screenshots."""
+    if step.get("result") == "fail" or step.get("needle"):
         return False
     text = step.get("text_data", "") or ""
     if not text:
         return not step.get("display_title")
     for ln in text.split("\n"):
         if ln.startswith("# Command:"):
-            return bool(_HOUSEKEEPING_CMD_RE.match(ln[10:].strip()))
+            return bool(_TRANSFER_CMD_RE.match(ln[10:].strip()))
     return False
+
+
+def is_command_step(step: JsonDict) -> bool:
+    """Return True for steps that ran a command: their text_data has a `# Result:` section."""
+    return "# Result:" in (step.get("text_data") or "")
+
+
+def is_record_info(step: JsonDict) -> bool:
+    """Return True for passed steps with a title and free text, like record_info."""
+    text = step.get("text_data") or ""
+    return (
+        step.get("result") != "fail"
+        and bool(step.get("display_title"))
+        and bool(text.strip())
+        and not any(marker in text for marker in _COMMAND_MARKERS)
+    )
+
+
+def previous_modules(all_modules: list[JsonDict], module: JsonDict, n: int = 3) -> list[JsonDict]:
+    """Return the up to `n` modules that ran before `module` (found by identity, as names repeat)."""
+    idx = next((i for i, m in enumerate(all_modules) if m is module), None)
+    return [] if idx is None else all_modules[max(0, idx - n) : idx]
 
 
 def _failure_key(detail: JsonDict) -> str:
@@ -237,12 +280,3 @@ def is_secondary(step: JsonDict, post_start: int | None) -> bool:
     if "# Post fail hook died" in (step.get("text_data") or ""):
         return True
     return post_start is not None and step.get("num", 0) > post_start
-
-
-def secondary_line(step: JsonDict, repeats: list[int]) -> str:
-    """Render a failure of the post-fail hook as one line."""
-    text = re.sub(r"^# (?:Post fail hook died|Test died): ", "", (step.get("text_data") or "").strip())
-    first = ESC_RE.sub("", next((ln for ln in text.split("\n") if ln.strip()), ""))[:200]
-    more = f" (x{len(repeats) + 1})" if repeats else ""
-    title = " ".join(str(step.get("display_title", "")).split())
-    return f"Secondary failure (post-fail hook) #{step.get('num', '?')} {title}: {first}{more}".rstrip()

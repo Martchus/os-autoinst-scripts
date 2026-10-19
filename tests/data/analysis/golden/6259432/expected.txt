@@ -1,13 +1,12 @@
-OpenQA Job Analysis: https://openqa.opensuse.org/t6259432
+OpenQA Failed Job Analysis:
 
-Fetching test details from https://openqa.opensuse.org/tests/6259432/details_ajax...
 Test: upgrade_Leap_15.2_kde
 Result: failed (state done)
-Settings: DISTRI=opensuse VERSION=Tumbleweed FLAVOR=DVD ARCH=aarch64 BUILD=20261007 MACHINE=aarch64 BACKEND=qemu QEMURAM=2048 UEFI=1 BOOTFROM=cdrom HDD_1=opensuse-15.2-aarch64-GM-kde@aarch64.qcow2
+Settings: MACHINE=aarch64 BACKEND=qemu QEMURAM=2048 UEFI=1 BOOTFROM=cdrom HDD_1=opensuse-15.2-aarch64-GM-kde@aarch64.qcow2
 Modules: 1 failed / 0 softfailed / 65 skipped
 
-Previous/next runs: previous 5 run(s): 2x failed in updates_packagekit_kde (`hour(s)`; `Failed (post)`) [job 6258532, build 20261007]; incomplete [job 6259017, build 20261007]; failed [job 6256909, build 20261006]; failed in opensuse_repos (`zypper -n in openSUSE-repos-NVIDIA | cat; ( exit ${PIPESTATUS[0]} )`; `Failed (post)`) [job 6253658, build 20261005].
-Same group+build: 57 of 312 other jobs in group 3 build 20261007 failed (31 in flavor DVD): 2x extra_tests_ai_ml failed in tvm (`Conflict`) [job 6258613]; extra_tests_textmode failed in mta, kdump, systemd_resolved, velociraptor_client_event_collect, sssd_389ds_functional (`Conflict`; `qr/sysrq\s*:\s+show\s+blocked\s+state/i`) [job 6258505]; remote_ssh_controller parallel_failed in disable_grub_timeout (`no candidate needle with tag(s) 'installation-settings-overview-loaded'`) [job 6258531]; remote_ssh_target failed in remote_target (`no candidate needle with tag(s) 'systemd-boot'`; `YaST2 log errors`) [job 6258533]; network_bonding_target failed in network_bonding_setup (`podman pull registry.opensuse.org/opensuse/factory/totest/containers/opensuse/k…`) [job 6258562]; extra_tests_webserver failed in rails (`rails new mycoolapp --skip-bundle --skip-test --skip-thruster --skip-brakeman -…`) [job 6258587]; +47 more; 249 passed/softfailed.
+Previous/next runs: previous 5 run(s): 2x failed in updates_packagekit_kde (`hour(s)`) [job 6258532, build 20261007]; incomplete [job 6259017, build 20261007]; failed [job 6256909, build 20261006]; failed in opensuse_repos (`zypper -n in openSUSE-repos-NVIDIA | cat; ( exit ${PIPESTATUS[0]} )`) [job 6253658, build 20261005].
+Same group+build: 57 of 312 other jobs in group 3 build 20261007 failed (31 in flavor DVD): 2x extra_tests_ai_ml failed in tvm (`zypper -n in tvmc python3-pytest python3-tornado gcc-c++`) [job 6258613]; extra_tests_textmode failed in mta, kdump, systemd_resolved, velociraptor_client_event_collect, sssd_389ds_functional (`zypper -n in -l postfix mailx`; `cp -a /etc/nsswitch.conf{,.bak}`) [job 6258505]; remote_ssh_controller parallel_failed in disable_grub_timeout (`no candidate needle with tag(s) 'installation-settings-overview-loaded'`) [job 6258531]; remote_ssh_target failed in remote_target (`no candidate needle with tag(s) 'systemd-boot'`) [job 6258533]; network_bonding_target failed in network_bonding_setup (`podman pull registry.opensuse.org/opensuse/factory/totest/containers/opensuse/k…`) [job 6258562]; extra_tests_webserver failed in rails (`rails new mycoolapp --skip-bundle --skip-test --skip-thruster --skip-brakeman -…`) [job 6258587]; +47 more; 249 passed/softfailed.
 
 Key error: firmware crash (Synchronous Exception)
 
@@ -32,28 +31,25 @@ ASSERT [HiiDatabase] Font.c(1742): GlyphBuf != ((void *) 0)
 Failed Module: installation/grub_test
 ================================================================================
 
-# Cmd[1]: no candidate needle with tag(s) 'tianocore-boot_maintenance_manager'
-# Cmd[2]: qr/login:\s*$/ui
-# Cmd[3]: Failed
-(post)
-Steps: 4 failed / 0 softfailed
+Previous modules: installation/await_install (passed), installation/logs_from_installation_system (passed), installation/reboot_after_installation (passed)
 
-Step context:
-  #320 [FAIL]  (screenshot: grub_test-320.png)
+The module has been failed by: "no candidate needle with tag(s) 'tianocore-boot_maintenance_manager'" needle check.
+
+Step context (last 20 command/needle/record_info steps)
+  >>> The next step is the one that failed the test <<<
+  #320 [FAIL]  no match for tags: tianocore-boot_maintenance_manager  (screenshot: grub_test-320.png)
   #321 [FAIL]  Failed  # Test died: no candidate needle with tag(s) 'tianocore-boot_maintenance_manager' matched
-  #322  Post-fail  Entering post fail hook
-  #323 [FAIL]  wait_serial  marker: qr/login:\s*$/ui
-  #324 [FAIL]  Failed
+  #322  Post-fail
+    Entering post fail hook
+  #323 [FAIL, post-fail hook]  wait_serial  marker: qr/login:\s*$/ui
+  #324 [FAIL, post-fail hook]  Failed
 (post)  # Post fail hook died: Failed to wait for login prompt at opensuse/lib/serial_terminal.pm line 179, <$isotovideo> line 1
 
-*** TEST DIED ERROR ***
-
-Error in step #321:
-# Test died: no candidate needle with tag(s) 'tianocore-boot_maintenance_manager' matched
---- # stack trace
+--- Stack trace ---
 testapi::send_key_until_needlematch('tianocore-boot_maintenance_manager', 'down', 6, 5) called at products/opensuse/../../lib/opensusebasetest.pm line 333
 grub_utils::handle_installer_medium_bootup at lib/grub_utils.pm line 35
 grub_utils::grub_test at tests/installation/grub_test.pm line 20
+--- End of Log Section ---
 
 --- autoinst-log.txt (searching for needle failure) ---
 [needle search: 34 no-match polls, best candidate boot_to_desktop-tianocore-boot_maintenance_manager-20170829 (0.00), 22 unchanged-screen polls]
@@ -176,7 +172,4 @@ grub_utils::grub_test at tests/installation/grub_test.pm line 20
 [2026-10-08T11:15:50.729899+01:00] [debug] [pid:8225] skipping console-yast2_bootloader (after fatal failure)
 [2026-10-08T11:15:50.731594+01:00] [debug] [pid:8225] skipping console-vim (after fatal failure)
 --- End of Log Section ---
-
-Secondary failure (post-fail hook) #323 wait_serial: # wait_serial expected: qr/login:\s*$/ui
-Secondary failure (post-fail hook) #324 Failed (post): Failed to wait for login prompt at opensuse/lib/serial_terminal.pm line 179, <$isotovideo> line 1.
 

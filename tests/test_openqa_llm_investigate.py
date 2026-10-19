@@ -619,7 +619,7 @@ def test_investigate_prompt_contains_analysis_and_instructions(mocker: MockerFix
     llm_investigate.investigate("123")
 
     prompt = _prompt_sent(client)
-    assert "OpenQA Job Analysis: https://openqa.opensuse.org/t123" in prompt
+    assert "OpenQA Failed Job Analysis:" in prompt
     assert "Failed Module: installation/isosize" in prompt
     assert "context window of 100 lines" in prompt
     assert "Question 1:" in prompt
@@ -742,6 +742,60 @@ def test_investigate_redacts_investigation_info(mocker: MockerFixture) -> None:
     llm_investigate.investigate("123")
 
     assert "u:pw@" not in _prompt_sent(client)
+
+
+@pytest.mark.parametrize("diff", [None, "", {}, [], "  "])
+def test_investigate_omits_empty_investigation_info(mocker: MockerFixture, diff: Any) -> None:
+    mocker.patch("llm_investigate.post_comment")
+    mocker.patch("llm_investigate.typer.echo")
+    mocker.patch("llm_investigate.analyze_job", return_value="the analysis")
+    client = setup_mock_client(mocker, {"investigation_ajax": {"diff_to_last_good": diff}})
+
+    llm_investigate.investigate("123")
+
+    prompt = _prompt_sent(client)
+    assert "Investigation info" not in prompt
+    assert "None available" not in prompt
+    assert "- Result:" in prompt
+    assert "\n\nFailure analysis (" in prompt
+
+
+def test_investigate_omits_investigation_info_when_the_key_is_missing(mocker: MockerFixture) -> None:
+    mocker.patch("llm_investigate.post_comment")
+    mocker.patch("llm_investigate.typer.echo")
+    mocker.patch("llm_investigate.analyze_job", return_value="the analysis")
+    client = setup_mock_client(mocker, {"investigation_ajax": {"last_good": None}})
+
+    llm_investigate.investigate("123")
+
+    assert "Investigation info" not in _prompt_sent(client)
+
+
+def test_investigate_shows_a_diff_string_as_plain_text(mocker: MockerFixture) -> None:
+    mocker.patch("llm_investigate.post_comment")
+    mocker.patch("llm_investigate.typer.echo")
+    mocker.patch("llm_investigate.analyze_job", return_value="the analysis")
+    diff = '-   "BUILD" : "1",\n+   "BUILD" : "2",\n'
+    client = setup_mock_client(mocker, {"investigation_ajax": {"diff_to_last_good": diff}})
+
+    llm_investigate.investigate("123")
+
+    assert f"Investigation info (diff to last good):\n{diff}\nFailure analysis (" in _prompt_sent(client)
+
+
+def test_investigate_shows_a_structured_diff_as_indented_json(mocker: MockerFixture) -> None:
+    mocker.patch("llm_investigate.post_comment")
+    mocker.patch("llm_investigate.typer.echo")
+    mocker.patch("llm_investigate.analyze_job", return_value="the analysis")
+    client = setup_mock_client(mocker, {"investigation_ajax": {"diff_to_last_good": {"BUILD": ["1", "2"]}}})
+
+    llm_investigate.investigate("123")
+
+    assert '{\n  "BUILD": [\n    "1",\n    "2"\n  ]\n}\n\nFailure analysis' in _prompt_sent(client)
+
+
+def test_investigation_text_is_redacted() -> None:
+    assert "pw" not in llm_investigate._investigation_text("+ url http://u:pw@h/r")
 
 
 @pytest.mark.parametrize(

@@ -487,3 +487,35 @@ def test_get_serial_tail_non_positive_lines_returns_nothing(lines: int) -> None:
 def test_find_log_range_max_lines_one_keeps_no_tail() -> None:
     log = "S\n1\n2\n3\nE"
     assert logs.find_log_range(log, "S", "E", max_lines=1) == ["[...4 lines omitted to fit context limit...]"]
+
+
+_SERIAL = (
+    "# _OANM=1; echo hi; echo AAAA-$?-\nhi\nAAAA-0-\n"
+    "# _OANM=1; zypper in x; echo e9sH4-$?-\n{out}\ne9sH4-4-\n"
+    "# _OANM=1; next; echo BBBB-$?-\nnext out\nBBBB-0-\n"
+)
+
+
+def test_command_output_ends_at_the_exit_marker() -> None:
+    serial = _SERIAL.format(out="l1\nl2\nl3")
+    assert logs.command_output(serial, "zypper in x", 50) == ["l1", "l2", "l3"]
+
+
+def test_command_output_keeps_last_lines_with_note() -> None:
+    serial = _SERIAL.format(out="\n".join(f"l{i}" for i in range(1, 8)))
+    assert logs.command_output(serial, "zypper in x", 3) == ["... (4 earlier output lines omitted)", "l5", "l6", "l7"]
+
+
+def test_command_output_without_marker_stops_at_next_command() -> None:
+    serial = "# _OANM=1; sleep 9; echo CCCC-$?-\npartial\n# _OANM=1; next; echo DDDD-$?-\nnext out\n"
+    assert logs.command_output(serial, "sleep 9", 50) == ["partial"]
+
+
+def test_command_output_missing_command_or_output_is_empty() -> None:
+    assert logs.command_output(_SERIAL.format(out="x"), "nope", 50) == []
+    assert logs.command_output(_SERIAL.format(out=""), "zypper in x", 50) == []
+
+
+def test_command_output_uses_the_last_run_of_a_command() -> None:
+    serial = "# _OANM=1; ls; echo AAAA-$?-\nold\nAAAA-0-\n# _OANM=1; ls; echo BBBB-$?-\nnew\nBBBB-0-\n"
+    assert logs.command_output(serial, "ls", 50) == ["new"]

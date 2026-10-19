@@ -1,13 +1,12 @@
-OpenQA Job Analysis: https://openqa.opensuse.org/t6259416
+OpenQA Failed Job Analysis:
 
-Fetching test details from https://openqa.opensuse.org/tests/6259416/details_ajax...
 Test: create_hdd_textmode
 Result: failed (state done)
-Settings: DISTRI=opensuse VERSION=Tumbleweed FLAVOR=NET ARCH=arm BUILD=20261007 MACHINE=aarch32 BACKEND=qemu QEMURAM=2048 UEFI=1
+Settings: MACHINE=aarch32 BACKEND=qemu QEMURAM=2048 UEFI=1
 Modules: 1 failed / 0 softfailed / 18 skipped
 
-Previous/next runs: previous 5 run(s): 4x failed in resolve_dependency_issues (`no candidate needle with tag(s) 'installation-settings-overview-loaded'`; `qr/login:\s*$/ui`) [job 6259175, build 20261007]; incomplete [job 6259399, build 20261007].
-Same group+build: 5 of 20 other jobs in group 143 build 20261007 failed (2 in flavor NET): create_hdd_minimalx failed in select_patterns (`no candidate needle with tag(s) 'inst-overview'`; `qr/login:\s*$/ui`) [job 6259174]; textmode failed in resolve_dependency_issues (`no candidate needle with tag(s) 'installation-settings-overview-loaded'`; `qr/login:\s*$/ui`) [job 6259186]; jeos-extra failed in diskusage, journal_check, command_not_found, java, sysstat_agnostic, gcc, valgrind, a2ps (`Unknown issue`; `Data size`) [job 6259193]; jeos failed in journal_check, postgresql_server (`Unknown issue`; `systemctl --no-pager start postgresql.service`) [job 6259196]; jeos failed in diskusage, journal_check, consoletest_setup (`Unknown issue`; `Data size`) [job 6259414]; 2 passed/softfailed.
+Previous/next runs: previous 5 run(s): 4x failed in resolve_dependency_issues (`no candidate needle with tag(s) 'installation-settings-overview-loaded'`) [job 6259175, build 20261007]; incomplete [job 6259399, build 20261007].
+Same group+build: 5 of 20 other jobs in group 143 build 20261007 failed (2 in flavor NET): create_hdd_minimalx failed in select_patterns (`no candidate needle with tag(s) 'inst-overview'`) [job 6259174]; textmode failed in resolve_dependency_issues (`no candidate needle with tag(s) 'installation-settings-overview-loaded'`) [job 6259186]; jeos-extra failed in diskusage, journal_check, command_not_found, java, sysstat_agnostic, gcc, valgrind, a2ps (`Unknown issue`; `JeOS(1899683840)`) [job 6259193]; jeos failed in journal_check, postgresql_server (`Unknown issue`; `systemctl --no-pager start postgresql.service`) [job 6259196]; jeos failed in diskusage, journal_check, consoletest_setup (`Unknown issue`; `JeOS(1899683840)`) [job 6259414]; 2 passed/softfailed.
 
 Found 1 failed module(s)
 
@@ -15,25 +14,28 @@ Found 1 failed module(s)
 Failed Module: installation/resolve_dependency_issues
 ================================================================================
 
-# Cmd[1]: no candidate needle with tag(s) 'installation-settings-overview-loaded'
-# Cmd[2]: qr/login:\s*$/ui
-# Cmd[3]: Failed
-(post)
-Steps: 4 failed / 0 softfailed
+Previous modules: installation/partitioning_finish (passed), installation/installer_timezone (passed), installation/user_settings (passed)
 
-Step context:
-  #3 [FAIL]  (screenshot: resolve_dependency_issues-3.png)
+The module has been failed by: "no candidate needle with tag(s) 'installation-settings-overview-loaded'" needle check.
+
+Step context (last 20 command/needle/record_info steps)
+  >>> The next step is the one that failed the test <<<
+  #3 [FAIL]  no match for tags: installation-settings-overview-loaded  (screenshot: resolve_dependency_issues-3.png)
   #4 [FAIL]  Failed  # Test died: no candidate needle with tag(s) 'installation-settings-overview-loaded' matched
-  #5  Post-fail  Entering post fail hook
+  #5  Post-fail
+    Entering post fail hook
+  #6  screen match  needle: text-logged-in-root-simple_prompt-20190301 (100%)  tags: text-logged-in-root, tty6-selected
+  #7  screen match  needle: text-logged-in-root-simple_prompt-20190301 (100%)  tags: text-logged-in-root
+  #8  screen match  needle: root-console-no_color-20200130 (100%)  tags: root-console
   #10  wait_serial  marker: qr/BASH:([^:]*):/u
   #12  wait_serial  command: setterm -blank 0  exit code: 0
+  #13  screen match  needle: root-console-no_color-20200130 (100%)  tags: root-console
+  #15  wait_serial  command: pkill zypper  exit code: 1
+  #17  wait_serial  command: zypper -n patch --debug-solver --with-interactive -l  exit code: 127
 
-*** TEST DIED ERROR ***
-
-Error in step #4:
-# Test died: no candidate needle with tag(s) 'installation-settings-overview-loaded' matched
---- # stack trace
+--- Stack trace ---
 testapi::assert_screen('installation-settings-overview-loaded', 420) called at tests/installation/resolve_dependency_issues.pm line 20
+--- End of Log Section ---
 
 --- autoinst-log.txt (searching for needle failure) ---
 [needle search: 41 no-match polls, best candidate inst-overview-install-button-not-focused-20260414 (0.10), 29 unchanged-screen polls, 13 slow-check warnings]
@@ -101,7 +103,4 @@ testapi::assert_screen('installation-settings-overview-loaded', 420) called at t
 [2026-10-08T11:15:45.319794+02:00] [debug] [pid:130533] >>> testapi::_handle_found_needle: found root-console-no_color-20200130, similarity 1.00 @ 120/272
 [2026-10-08T11:15:45.322424+02:00] [debug] [pid:130533] [step:installation,resolve_dependency_issues,14] tests/installation/resolve_dependency_issues.pm:36 called Utils::Logging::upload_solvertestcase_logs -> products/opensuse/../../lib/Utils/Logging.pm:417 called testapi::script_run
 --- End of Log Section ---
-
-Secondary failure (post-fail hook) #40 wait_serial: # wait_serial expected: qr/login:\s*$/ui
-Secondary failure (post-fail hook) #41 Failed (post): Failed to wait for login prompt at opensuse/lib/serial_terminal.pm line 179, <$isotovideo> line 1.
 

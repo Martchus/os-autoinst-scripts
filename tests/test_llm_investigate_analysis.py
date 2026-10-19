@@ -52,18 +52,18 @@ def _module_report(
 
 def test_header_and_failed_module_count(make_openqa: Any, sample_details_failed: Any) -> None:
     out = _analyze(make_openqa, sample_details_failed)
-    assert out.startswith("OpenQA Job Analysis: https://srv/t42\n")
-    assert "Fetching test details from https://srv/tests/42/details_ajax..." in out
+    assert out.startswith("OpenQA Failed Job Analysis:\n\n")
+    assert "Fetching test details" not in out
     assert "Found 3 failed module(s)" in out
     assert "Failed Module: installation/install_pkgs" in out
 
 
 def test_sections_for_each_failure_kind(make_openqa: Any, sample_details_failed: Any) -> None:
     out = _analyze(make_openqa, sample_details_failed)
-    assert "Failed Command #1:" in out
-    assert "*** TEST DIED ERROR ***" in out
-    assert "*** STEP FAILURE ***" in out
-    assert "# Cmd[1]: zypper install foo" in out
+    for gone in ("Failed Command #", "TEST DIED ERROR", "STEP FAILURE", "Failing command output"):
+        assert gone not in out
+    assert 'The module has been failed by: "zypper install foo" command' in out
+    assert "# Cmd[" not in out
 
 
 def test_module_path_from_stack_trace(make_openqa: Any, sample_details_failed: Any) -> None:
@@ -81,9 +81,9 @@ def test_softfailed_modules_are_included_on_request(make_openqa: Any, sample_det
     assert "hard_failure" in out
 
 
-def test_command_not_in_serial_log_shows_text_data(make_openqa: Any, sample_details_failed: Any) -> None:
+def test_command_not_in_serial_log_has_no_serial_section(make_openqa: Any, sample_details_failed: Any) -> None:
     out = _analyze(make_openqa, sample_details_failed, {"serial_terminal.txt": "unrelated\n"})
-    assert "Text data from test details:" in out
+    assert "lines before/after" not in out
 
 
 def test_serial_context_around_failed_command(make_openqa: Any, sample_details_failed: Any) -> None:
@@ -110,7 +110,8 @@ def test_context_lines_option(make_openqa: Any, sample_details_failed: Any) -> N
 def test_no_failed_modules_raises(make_openqa: Any, msg: str, *, soft: bool) -> None:
     with pytest.raises(NoFailedModulesError, match=msg) as excinfo:
         _analyze(make_openqa, {"modules": []}, include_softfailed=soft)
-    assert excinfo.value.partial_output.startswith("OpenQA Job Analysis: https://srv/t42\n")
+    label = "Failed/Softfailed" if soft else "Failed"
+    assert excinfo.value.partial_output.startswith(f"OpenQA {label} Job Analysis:\n")
     assert msg in excinfo.value.partial_output
 
 
@@ -129,7 +130,7 @@ def test_job_without_modules_reports_job_level_failure(make_openqa: Any) -> None
 def test_details_fetch_failure_keeps_header(make_openqa: Any) -> None:
     with pytest.raises(AnalyzerError, match="Error fetching") as excinfo:
         analysis.analyze_job(make_openqa({}), "42")
-    assert excinfo.value.partial_output.startswith("OpenQA Job Analysis: https://srv/t42\n")
+    assert excinfo.value.partial_output.startswith("OpenQA Failed Job Analysis:\n")
 
 
 def test_job_level_failure_uses_supplied_job(make_openqa: Any) -> None:
@@ -151,52 +152,241 @@ def test_missing_job_metadata_does_not_refetch(make_openqa: Any, mocker: Any) ->
 def test_commands_follow_module_header(make_openqa: Any, category: str) -> None:
     out = _module_report(
         make_openqa,
-        [_step(0, "ok", title="Post-fail"), _step(1, text="# Command: zypper patch\n# Exit code: 1")],
+        [_step(1, text="# Command: zypper patch\n# Exit code: 1"), _step(2, "ok", title="Post-fail")],
         category=category,
     )
-    header = f"Failed Module: {category}/m\n" + "=" * 80 + "\n\n"
-    assert header + "# Cmd[1]: zypper patch (exit 1)" in out
-    assert out.count("# Cmd[1]:") == 1
+    header = f"Failed Module: {category}/m\n" + "=" * 80 + "\n\nPrevious modules: none (first module)\n\n"
+    assert header + 'The module has been failed by: "zypper patch" command (exit 1).\n' in out
+    assert out.count("been failed by") == 1
 
 
 def test_repeated_failures_are_shown_once(make_openqa: Any) -> None:
     out = _module_report(make_openqa, [_step(i, title="Unknown issue", text=f"msg at {i}") for i in range(1, 31)])
-    assert out.count("*** STEP FAILURE ***") == 1
+    assert out.count("[FAIL]") == 8
     assert "repeats 29 more times" in out
-    assert "Steps: 30 failed / 0 softfailed" in out
+    assert "Steps:" not in out
     assert "steps omitted" in out
 
 
-def test_step_context_skips_housekeeping(make_openqa: Any) -> None:
+def test_step_context_skips_script_transfer_only(make_openqa: Any) -> None:
     details = [
         _step(1, "ok", text="# Command: zypper patch\n# Exit code: 0"),
-        _step(2, "ok", text="# Command: scp a b\n# Exit code: 0"),
-        _step(3, title="Failed", text="# Test died: boom"),
+        _step(2, "ok", text="# Command: curl -f -v http://h:1/tok/current_script > /tmp/scriptX.sh\n# Exit code: 0"),
+        _step(3, "ok", text="# Command: scp a b\n# Exit code: 0"),
+        _step(4, "ok", text="# Command: rm -rf /tmp/x\n# Exit code: 0"),
+        _step(5, title="Failed", text="# Test died: boom"),
     ]
     out = _module_report(make_openqa, details)
     assert "command: zypper patch" in out
-    assert "command: scp" not in out
+    assert "current_script" not in out
+    assert "command: scp a b" in out
+    assert "command: rm -rf /tmp/x" in out
+
+
+def _cmd(num: int, cmd: str, output: str = "") -> dict[str, Any]:
+    text = f"# Command: {cmd}\n# Result:\n{cmd[:20]}\n\n{output}\n\n# Exit code: 0\n"
+    return _step(num, "ok", text=text)
+
+
+def _context(out: str) -> list[str]:
+    lines = out.split("\n")
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("Step context"))
+    return lines[start : lines.index("", start)]
+
+
+def test_step_context_window_is_shared_and_header_is_fixed(make_openqa: Any) -> None:
+    needle = {"num": 30, "result": "ok", "needle": "n-1", "area": [{"similarity": 100}], "tags": ["t"]}
+    details = [_cmd(n, f"cmd{n}") for n in range(1, 30)] + [needle, _step(31, title="Failed", text="# Test died: x")]
+    ctx = _context(_module_report(make_openqa, details))
+    assert ctx[0] == "Step context (last 20 command/needle/record_info steps)"
+    assert "  #30  screen match  needle: n-1 (100%)  tags: t" in ctx
+    assert "  #11  wait_serial  command: cmd11  exit code: 0" in ctx
+    assert not any(ln.startswith("  #10 ") for ln in ctx)
+
+
+def test_step_context_output_tail_for_newest_five_commands_only(make_openqa: Any) -> None:
+    details = [_cmd(n, f"cmd{n}", "\n".join(f"out{n}-{i}" for i in range(7))) for n in range(1, 8)]
+    ctx = _context(_module_report(make_openqa, [*details, _step(8, title="Failed", text="# Test died: x")]))
+    text = "\n".join(ctx)
+    assert "out7-6" in text
+    assert "    ... (2 earlier output lines omitted)" in ctx
+    assert "out3-6" in text
+    assert "out2-6" not in text
+    assert "command: cmd2  exit code: 0" in text
+
+
+def test_step_context_record_info_tiers(make_openqa: Any) -> None:
+    body = "\n".join(f"b{i}" for i in range(40))
+    infos = [_step(n, "ok", title=f"info{n}", text=body) for n in range(1, 8)]
+    ctx = _context(_module_report(make_openqa, [*infos, _step(8, title="Failed", text="# Test died: x")]))
+    text = "\n".join(ctx)
+    assert text.count("    b0\n") == 7
+    assert "    b29\n    ... (10 more lines)" in text
+    assert "    b1\n    ... (38 more lines)" in text
+    assert text.count("... (10 more lines)") == 5
+    assert text.count("... (38 more lines)") == 2
+
+
+def test_step_context_after_step_record_info_is_full(make_openqa: Any) -> None:
+    body = "\n".join(f"b{i}" for i in range(10))
+    details = [_step(1, title="Failed", text="# Test died: x"), _step(2, "ok", title="late info", text=body)]
+    text = "\n".join(_context(_module_report(make_openqa, details)))
+    assert "    b9" in text
+
+
+def test_step_context_failed_record_info_is_not_listed_twice(make_openqa: Any) -> None:
+    details = [_step(1, title="Stall", text="stalled\nmore"), _step(2, title="Failed", text="# Test died: x")]
+    ctx = _context(_module_report(make_openqa, details))
+    assert not any(ln.startswith("    stalled") for ln in ctx)
+
+
+def test_previous_modules_line(make_openqa: Any) -> None:
+    mods = [{"name": n, "category": "c", "result": r, "details": []} for n, r in (("a", "passed"), ("b", "softfailed"))]
+    mods += [{"name": "p", "category": "c", "result": "passed", "details": []}] * 2
+    mods.append(_module([_step(1, title="Failed", text="# Test died: x")], name="f"))
+    out = _analyze(make_openqa, {"modules": mods})
+    assert "Previous modules: c/b (softfailed), c/p (passed), c/p (passed)\n" in out
+
+
+_DIED_ZYPPER = "# Test died: 'zypper in x' failed with code 4\n\nRelated zypper logs:\n"
+
+
+def test_died_command_shows_its_output_instead_of_the_serial_tail(make_openqa: Any) -> None:
+    serial = "# _OANM=1; zypper in x; echo e9sH4-$?-\nProblem: conflict\ne9sH4-4-\nlater noise\n"
+    out = _module_report(make_openqa, [_step(1, title="Failed", text=_DIED_ZYPPER)], {"serial_terminal.txt": serial})
+    assert "  #1 [FAIL]  Failed  # Test died: 'zypper in x' failed with code 4\n" in out
+    assert "    Related zypper logs:\n    Problem: conflict\n" in out
+    assert "later noise" not in out
+    assert "Serial Terminal Log" not in out
+
+
+def test_died_command_missing_from_the_serial_log_shows_nothing_else(make_openqa: Any) -> None:
+    out = _module_report(
+        make_openqa, [_step(1, title="Failed", text=_DIED_ZYPPER)], {"serial_terminal.txt": "unrelated\n"}
+    )
+    assert "Serial Terminal Log" not in out
+
+
+def test_died_without_command_keeps_the_serial_tail(make_openqa: Any) -> None:
+    out = _module_report(
+        make_openqa, [_step(1, title="Failed", text="# Test died: boom")], {"serial_terminal.txt": "tail line\n"}
+    )
+    assert "--- Serial Terminal Log (last 100 lines) ---" in out
+
+
+def test_failed_wait_serial_shows_the_last_output_lines(make_openqa: Any) -> None:
+    text = "# wait_serial expected: qr/login/\n# Result:\nqr/login/\n\n" + "\n".join(f"o{i}" for i in range(60))
+    out = _module_report(make_openqa, [_step(1, text=text)], {"serial_terminal.txt": "# qr/login/\nctx\n"})
+    assert "  #1 [FAIL]  wait_serial  marker: qr/login/\n    ... (10 earlier output lines omitted)\n    o10\n" in out
+    assert "    o59\n\n" in out
+    assert "lines before/after" not in out
+
+
+def test_failed_wait_serial_without_output_keeps_the_serial_context(make_openqa: Any) -> None:
+    text = "# wait_serial expected: qr/login/\n# Result:\n\n"
+    out = _module_report(make_openqa, [_step(1, text=text)], {"serial_terminal.txt": "a\n# qr/login/\nb\n"})
+    assert "Serial Terminal Log (100 lines before/after)" in out
+
+
+def test_step_context_after_window_runs_to_the_third_command(make_openqa: Any) -> None:
+    marker = _step(3, "ok", text="# wait_serial expected: qr/x/\n# Result:\nm\n\nmarker out")
+    after = [
+        _step(2, "unk", title="Post-fail", text="hook"),
+        marker,
+        *(_cmd(n, f"post{n}", f"out{n}") for n in range(4, 9)),
+    ]
+    details = [_step(1, title="Failed", text="# Test died: x"), *after]
+    ctx = "\n".join(_context(_module_report(make_openqa, details)))
+    assert "command: post6  exit code: 0\n    out6" in ctx
+    assert "post7" not in ctx
+    assert "marker out" not in ctx
+    assert "#3  wait_serial  marker: qr/x/" in ctx
+
+
+def test_step_context_after_window_with_fewer_than_three_commands(make_openqa: Any) -> None:
+    details = [_step(1, title="Failed", text="# Test died: x"), _cmd(2, "only", "o")]
+    ctx = "\n".join(_context(_module_report(make_openqa, details)))
+    assert "command: only  exit code: 0\n    o" in ctx
+
+
+_MARK = "  >>> The next step is the one that failed the test <<<"
+
+
+def test_failure_marker_precedes_the_first_failing_step(make_openqa: Any) -> None:
+    details = [_cmd(1, "ok-cmd"), _step(2, title="Failed", text="# Test died: boom"), _cmd(3, "after")]
+    ctx = _context(_module_report(make_openqa, details))
+    assert ctx.index(_MARK) + 1 == next(i for i, ln in enumerate(ctx) if ln.startswith("  #2 [FAIL]"))
+    assert ctx.count(_MARK) == 1
+
+
+def test_failure_marker_precedes_the_died_step_of_a_failed_command(make_openqa: Any) -> None:
+    details = [_cmd(1, "zypper in x"), _step(2, title="Failed", text="# Test died: 'zypper in x' failed with code 4")]
+    ctx = _context(_module_report(make_openqa, details))
+    assert ctx[-2] == _MARK
+    assert ctx[-1].startswith("  #2 [FAIL]  Failed")
+
+
+def test_only_the_last_cluster_is_reported(make_openqa: Any) -> None:
+    out = _module_report(make_openqa, [_fail(10, "A", "boom a"), _fail(50, "B", "boom b")])
+    assert out.count(_MARK) == 1
+    assert "#50 [FAIL]  B  boom b" in out
+    assert "#10 [FAIL, non-fatal]  A" in out
+    assert out.count("boom a") == 1
+
+
+def test_failure_marker_moves_before_preceding_bare_failed_screens(make_openqa: Any) -> None:
+    details = [_cmd(1, "x"), _step(2, title="", screenshot="s.png"), _step(3, title="Failed", text="# Test died: boom")]
+    ctx = _context(_module_report(make_openqa, details))
+    assert ctx.index(_MARK) + 1 == next(i for i, ln in enumerate(ctx) if ln.startswith("  #2 [FAIL]"))
+
+
+def test_failing_command_walks_back_inside_the_last_cluster_only(make_openqa: Any) -> None:
+    details = [
+        _step(1, text="# Command: early\n# Result:\n# Exit code: 2"),
+        _step(40, text="# wait_serial expected: qr/login:/\n# Result:\nfoo"),
+        _step(41, title="Failed", text="# Test died: Could not find login prompt"),
+    ]
+    out = _module_report(make_openqa, details)
+    assert 'failed by: "qr/login:/" wait_serial marker.' in out
+    ctx = _context(out)
+    assert ctx.index(_MARK) + 1 == next(i for i, ln in enumerate(ctx) if ln.startswith("  #40 [FAIL]"))
+    died_only = _module_report(make_openqa, [details[0], details[2]])
+    assert "been failed by" not in died_only
+
+
+def test_failure_marker_with_an_omitted_steps_cluster(make_openqa: Any) -> None:
+    out = _module_report(make_openqa, [_step(i, title="Unknown issue", text=f"msg at {i}") for i in range(1, 31)])
+    assert out.count(_MARK) == 1
+    assert "steps omitted" in out
+
+
+def test_settings_line_dropped_when_only_duplicated_keys_remain(make_openqa: Any, sample_details_failed: Any) -> None:
+    routes = {
+        "/tests/42/details_ajax": json.dumps(sample_details_failed),
+        "/api/v1/jobs/42": json.dumps({"job": {"result": "failed", "settings": {"DISTRI": "sle", "BUILD": "1"}}}),
+    }
+    assert "Settings:" not in analysis.analyze_job(make_openqa(routes), "42")
 
 
 def test_screenshot_failure_is_skipped_when_test_died_in_cluster(make_openqa: Any) -> None:
     out = _module_report(
         make_openqa, [_step(1, title="", screenshot="s.png"), _step(2, title="Failed", text="# Test died: boom")]
     )
-    assert "STEP FAILURE" not in out
-    assert "TEST DIED ERROR" in out
+    assert "#1 [FAIL]  (screenshot: s.png)" in out
+    assert "Serial Terminal Log" in out
 
 
-def test_post_fail_steps_are_one_line(make_openqa: Any) -> None:
+def test_post_fail_steps_are_labelled_not_reported(make_openqa: Any) -> None:
     details = [
-        _step(1, title="", text="# Test died: real cause\n"),
+        _step(1, title="Failed", text="# Test died: real cause\n"),
         _step(2, "unk", title="Post-fail", text="Entering post fail hook"),
         _step(3, text="# wait_serial expected: qr/login:/\n# Result:\nfoo"),
         _step(4, title="Failed (post)", text="# Post fail hook died: no login\n\tstack frame"),
     ]
     out = _module_report(make_openqa, details)
     assert "real cause" in out
-    assert "Secondary failure (post-fail hook) #3 wait_serial" in out
-    assert "Secondary failure (post-fail hook) #4 Failed (post): no login" in out
+    assert "#3 [FAIL, post-fail hook]  wait_serial" in out
+    assert "Secondary failure" not in out
     assert "Failed Command #3" not in out
     assert "stack frame" not in out
 
@@ -214,19 +404,20 @@ def test_retries_are_announced_once(make_openqa: Any) -> None:
     details = [step for i in range(6) for step in (_step(i * 10 + 1, "ok", "step"), _fail(i * 10 + 5))]
     out = _module_report(make_openqa, details)
     assert "retried 5 more times before this attempt: #5, #15, #25, #35, #45" in out
-    assert out.count("*** STEP FAILURE ***") == 1
-    assert "Failure in step #55" in out
+    assert "  >>> The next step is the one that failed the test <<<\n  #55 [FAIL]" in out
 
 
 def test_distinct_failures_are_all_shown(make_openqa: Any) -> None:
     out = _module_report(make_openqa, [_fail(10), _fail(30, "Other", "boom"), _fail(50)])
-    assert out.count("*** STEP FAILURE ***") == 2
+    assert "#30 [FAIL, non-fatal]  Other" in out
+    assert out.count("boom") == 1
     assert "retried 1 more times" in out
 
 
-def test_cluster_cap(make_openqa: Any) -> None:
+def test_earlier_clusters_are_not_reported(make_openqa: Any) -> None:
     out = _module_report(make_openqa, [_fail(n * 20, f"T{n}", f"msg{n}") for n in range(1, 8)])
-    assert "... (2 more clusters omitted)" in out
+    assert "more clusters omitted" not in out
+    assert "  >>> The next step is the one that failed the test <<<\n  #140 [FAIL]  T7  msg7" in out
 
 
 def test_boilerplate_is_absent_from_serial_context(make_openqa: Any) -> None:
@@ -339,11 +530,16 @@ def test_job_header_lines(make_openqa: Any, sample_details_failed: Any) -> None:
     routes = {
         "/tests/42/details_ajax": json.dumps(sample_details_failed),
         "/api/v1/jobs/42": json.dumps({
-            "job": {"test": "patch_job", "result": "failed", "state": "done", "settings": {"DISTRI": "sle"}}
+            "job": {
+                "test": "patch_job",
+                "result": "failed",
+                "state": "done",
+                "settings": {"DISTRI": "sle", "MACHINE": "64bit", "BACKEND": "qemu"},
+            }
         }),
     }
     out = analysis.analyze_job(make_openqa(routes), "42")
-    assert "Test: patch_job\nResult: failed (state done)\nSettings: DISTRI=sle\n" in out
+    assert "Test: patch_job\nResult: failed (state done)\nSettings: MACHINE=64bit BACKEND=qemu\n" in out
     assert "Modules: 3 failed / 0 softfailed / 0 skipped" in out
 
 
@@ -399,7 +595,7 @@ def test_needle_failure_missing_from_autoinst_log(make_openqa: Any) -> None:
 
 def test_step_failure_without_text_shows_serial_tail(make_openqa: Any) -> None:
     out = _module_report(make_openqa, [_step(1, title="T")], {"serial_terminal.txt": "last serial line\n"})
-    assert "Failure in step #1: T\n\n--- Serial Terminal Log (last 100 lines) ---" in out
+    assert "  #1 [FAIL]  T\n\n--- Serial Terminal Log (last 100 lines) ---" in out
     assert "last serial line" in out
 
 
@@ -422,3 +618,26 @@ def test_null_text_data_does_not_crash(make_openqa: Any, title: str, category: s
 def test_null_text_data_on_died_sibling_step(make_openqa: Any) -> None:
     details = [_step(1, text="# Test died: boom"), _step(2, title="shot", text_data=None, screenshot="s.png")]
     assert "boom" in _module_report(make_openqa, details)
+
+
+def test_died_text_is_the_step_body_and_the_stack_trace_a_section(make_openqa: Any) -> None:
+    text = "# Test died: boom\nmore detail\n--- # stack trace\nfoo() called at tests/x.pm line 1\n"
+    out = _module_report(make_openqa, [_step(1, title="Failed", text=text)])
+    assert "  #1 [FAIL]  Failed  # Test died: boom\n    more detail\n\n" in out
+    assert "--- Stack trace ---\nfoo() called at tests/x.pm line 1\n--- End of Log Section ---" in out
+    assert "TEST DIED ERROR" not in out
+
+
+def test_died_text_is_capped_at_30_lines(make_openqa: Any) -> None:
+    text = "# Test died: boom\n" + "\n".join(f"d{i}" for i in range(50))
+    out = _module_report(make_openqa, [_step(1, title="Failed", text=text)])
+    assert "    d28\n    ... (21 more lines)\n" in out
+    assert "d29" not in out
+
+
+def test_failing_step_in_a_trimmed_cluster_is_kept(make_openqa: Any) -> None:
+    details = [_step(i, title="Unknown issue", text=f"msg at {i}") for i in range(1, 31)]
+    details[14]["text_data"] = "# Test died: middle\nbody line"
+    out = _module_report(make_openqa, details)
+    assert "  #15 [FAIL]  Unknown issue  # Test died: middle\n    body line\n" in out
+    assert out.count("steps omitted") == 2
