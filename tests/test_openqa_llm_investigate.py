@@ -50,10 +50,23 @@ def test_fetch_json_success() -> None:
     mock_client.get.assert_called_once_with("http://example.com", params=None, timeout=900.0)
 
 
-def test_fetch_json_failure() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.HTTPStatusError("error", request=Mock(), response=Mock(status_code=500)),
+        httpx.RequestError("network error", request=Mock()),
+        ValueError("invalid json"),
+    ],
+)
+def test_fetch_json_failure(error: Exception) -> None:
     mock_client = MagicMock(spec=httpx.Client)
     mock_response = Mock()
-    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError("error", request=Mock(), response=Mock())
+    if isinstance(error, ValueError):
+        mock_response.json.side_effect = error
+    elif isinstance(error, httpx.RequestError):
+        mock_client.get.side_effect = error
+    else:
+        mock_response.raise_for_status.side_effect = error
     mock_client.get.return_value = mock_response
 
     # Default failure returns {}

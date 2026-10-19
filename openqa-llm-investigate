@@ -243,7 +243,7 @@ def fetch_json(
         response.raise_for_status()
         return response.json()
     except (httpx.RequestError, httpx.HTTPStatusError, ValueError) as e:
-        if e.response.status_code == HTTPStatus.NOT_FOUND:
+        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == HTTPStatus.NOT_FOUND:
             log.debug("JSON endpoint %s returned 404 Not Found", url)
             return default if default is not None else {"error_status": HTTPStatus.NOT_FOUND}
         log.warning("Failed to fetch JSON from %s with params %s: %s", url, params, e)
