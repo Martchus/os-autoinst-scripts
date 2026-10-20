@@ -32,10 +32,12 @@ _REDACTIONS = (
     (re.compile(r"\b(Bearer\s+)[\w.~+/=-]{8,}"), rf"\1{_MASK}"),
     (re.compile(r"(\b[a-z][\w+.-]*://)[^/\s:@'\"]+:[^/\s@'\"]+@", re.IGNORECASE), rf"\1{_MASK}@"),
     (
-        re.compile(rf"((?<![/A-Za-z0-9-])(?:{_SENSITIVE_NAMES})['\"]?\s*[=:]\s*['\"]?)[^\s'\",;&]+", re.IGNORECASE),
+        re.compile(
+            rf"((?<![/A-Za-z0-9-])(?:{_SENSITIVE_NAMES})['\"]?[ \t]*[=:][ \t]*['\"]?)[^\s'\",;&]+", re.IGNORECASE
+        ),
         rf"\1{_MASK}",
     ),
-    (re.compile(rf"(--(?:{_SENSITIVE_NAMES})[=\s]['\"]?)[^\s'\",;&]+", re.IGNORECASE), rf"\1{_MASK}"),
+    (re.compile(rf"(--(?:{_SENSITIVE_NAMES})[= \t]['\"]?)[^\s'\",;&]+", re.IGNORECASE), rf"\1{_MASK}"),
     (
         re.compile(
             r"(\b(?:SUSEConnect|registercloudguest)\b[^;&|\n]*?\s-r\s+)(?:\"[^\"\n]*\"|'[^'\n]*'|[^\s;&|`'\")]+)"
@@ -80,7 +82,7 @@ def is_boilerplate_log_line(line: str) -> bool:
     return bool(_BOILERPLATE_RE.search(line))
 
 
-ESC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?=!]*[A-Za-z]")
+ESC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?=!]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\x1b[=>78]")
 _OA_MARKER_RE = re.compile(r"^(?=.*OA:)[\w:~-]+$")
 _LOG_TS_RE = re.compile(r"^\[(\d{4}-\d\d-\d\dT[\d:.]+Z)\]")
 _NEEDLE_NOMATCH_RE = re.compile(r"no match: [\d.]+s, best candidate: (\S+) \(([\d.]+)\)")
@@ -101,6 +103,11 @@ _ZYPP_LINE_RE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d <\d> ")
 _ZYPP_THROW_RE = re.compile(r"Exception\.cc\(log\):\d+ \S+ THROW:\s+(.*)")
 _URL_RE = re.compile(r"https?://([^/\s'\")]+)\S*")
 _DIED_MAX_LINES = 40
+_DIED_BODY_LINES = 30
+_STACK_TRACE_MARK = "--- # stack trace"
+_OUTPUT_TAIL_LINES = 5
+_OUTPUT_LINE_MAX = 200
+_TAGS_SHOWN = 3
 
 
 _STACK_FRAMES_SHOWN = 5
@@ -222,7 +229,7 @@ def condense_log(lines: list[str], *, autoinst: bool = False, max_lines: int | N
     return trim_stack_frames(_keep_tail(out, max_lines))
 
 
-_QR_PREFIX_RE = re.compile(r"qr/([^(]*)\(")
+_QR_PREFIX_RE = re.compile(r"qr/((?:[^(\\]|\\.)*)\(")
 _WRAPPER_RE = re.compile(r"echo \w+;\s*bash\s+.*/tmp/script\S+\.sh\s*$")
 
 
@@ -239,6 +246,11 @@ def _expected_command(expected: str) -> str:
         return qr.group(1)
     expected = _SCRIPT_FINISHED_RE.sub("", expected.strip("\"'"))
     return expected.replace("\\$", "$").replace("\\\\", "\\")
+
+
+def has_command(text_data: str) -> bool:
+    """Return True when a step ran a command of its own, not just the script-runner wrapper."""
+    return any((cmd := _command_of(ln)) is not None and not _BOILERPLATE_RE.match(cmd) for ln in text_data.split("\n"))
 
 
 def parse_command_from_text_data(text_data: str) -> str | None:
@@ -278,6 +290,12 @@ def _died_quoted_command(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _died_failed_with_code(text: str) -> str | None:
+    """P1b: `# Test died: 'CMD' failed with code N`, as zypper_call reports it."""
+    match = re.search(r"# Test died: '([^']+)' failed with code \d+", text)
+    return match.group(1).strip() if match else None
+
+
 def _died_godot(text: str) -> str | None:
     """P2: Waiting for Godot: CMD at FILE; an ssh `$'...'` wrapper yields its inner command."""
     match = re.search(r"Waiting for Godot:\s+(.+?)\s+at\s+", text)
@@ -311,11 +329,18 @@ def _died_call(text: str) -> str | None:
     return f"{match.group(1)}({args[:120]})" if args else match.group(1)
 
 
-_DIED_PARSERS = (_died_quoted_command, _died_godot, _died_returned_with, _died_needle, _died_call)
+_DIED_PARSERS = (
+    _died_quoted_command,
+    _died_failed_with_code,
+    _died_godot,
+    _died_returned_with,
+    _died_needle,
+    _died_call,
+)
 
 
 def parse_command_from_test_died(text_data: str) -> str | None:
-    """Parse the command from 'Test died' error messages, trying five patterns in priority order."""
+    """Parse the command from 'Test died' error messages, trying six patterns in priority order."""
     return next((cmd for parse in _DIED_PARSERS if (cmd := parse(text_data))), None)
 
 
@@ -343,22 +368,56 @@ def _step_fields(text_data: str) -> list[str]:
     return [f"{name}: {value}" for name, value in fields if value is not None]
 
 
-def format_step_summary_line(detail: JsonDict) -> str:
+def _tags_text(tags: list[str]) -> str:
+    more = f" (+{len(tags) - _TAGS_SHOWN})" if len(tags) > _TAGS_SHOWN else ""
+    return ", ".join(tags[:_TAGS_SHOWN]) + more
+
+
+def _screen_info(detail: JsonDict) -> str:
+    """Describe a matched needle or a failed screen step by its requested tags; empty for other steps."""
+    tags = detail.get("tags") or []
+    if needle := detail.get("needle"):
+        similarity = next((a["similarity"] for a in detail.get("area") or [] if "similarity" in a), None)
+        pct = f" ({similarity}%)" if similarity is not None else ""
+        return f"screen match  needle: {needle}{pct}" + (f"  tags: {_tags_text(tags)}" if tags else "")
+    return f"no match for tags: {_tags_text(tags)}" if tags and detail.get("result") == "fail" else ""
+
+
+def format_step_summary_line(detail: JsonDict, fail_label: str = "FAIL") -> str:
     """Format a step as `#N [FAIL]  title  command: C  marker: M  exit code: E`.
 
-    Without those fields the first text line (120 chars) or the screenshot name is shown.
-    Registration codes are not masked here.
+    Without those fields the first text line (120 chars), the needle or tags of a screen step, or the
+    screenshot name is shown. Registration codes are not masked here.
     """
     result = detail.get("result", "")
     title = detail.get("display_title", "")
     text_data = detail.get("text_data", "")
     screenshot = detail.get("screenshot", "")
-    prefix = f"#{detail.get('num', '?')}{' [FAIL]' if result == 'fail' else ''}{f'  {title}' if title else ''}"
+    prefix = f"#{detail.get('num', '?')}{f' [{fail_label}]' if result == 'fail' else ''}{f'  {title}' if title else ''}"
     if fields := _step_fields(text_data) if text_data else []:
         return f"{prefix}  {'  '.join(fields)}"
     if text_data:
         return f"{prefix}  {text_data.split(chr(10))[0][:120]}"
+    if info := _screen_info(detail):
+        return f"{prefix}  {info}" + (f"  (screenshot: {screenshot})" if result == "fail" and screenshot else "")
     return f"{prefix}  (screenshot: {screenshot})" if screenshot else prefix
+
+
+def step_output_tail(text_data: str, n: int = _OUTPUT_TAIL_LINES) -> list[str]:
+    """Return the last `n` output lines of a command step (after `# Result:`), behind an omission note if cut."""
+    _, found, result = text_data.partition("# Result:\n")
+    if not found:
+        return []
+    lines = [ESC_RE.sub("", ln).rstrip()[:_OUTPUT_LINE_MAX] for ln in result.split("\n")[1:]]
+    body = [ln for ln in lines if ln.strip() and not ln.startswith("# Exit code:") and not is_boilerplate_log_line(ln)]
+    omitted = len(body) - n
+    return [f"... ({omitted} earlier output lines omitted)", *body[-n:]] if omitted > 0 else body
+
+
+def record_info_body(text_data: str, max_lines: int) -> list[str]:
+    """Return the first `max_lines` non-blank lines of a record_info step, with a note for the rest."""
+    lines = [ESC_RE.sub("", ln).rstrip()[:_OUTPUT_LINE_MAX] for ln in text_data.split("\n") if ln.strip()]
+    return [*lines[:max_lines], f"... ({len(lines) - max_lines} more lines)"] if len(lines) > max_lines else lines
 
 
 def _search_command(lines: list[str]) -> str | None:
@@ -416,9 +475,9 @@ def _collapse_zypp(text: str) -> list[str]:
 
 def _drop_redundant_footer(lines: list[str]) -> list[str]:
     """Drop a trailing `--- # stack trace` footer when its frames are already shown above."""
-    if "--- # stack trace" not in lines:
+    if _STACK_TRACE_MARK not in lines:
         return lines
-    i = lines.index("--- # stack trace")
+    i = lines.index(_STACK_TRACE_MARK)
     tail = [ln for ln in lines[i + 1 :] if ln.strip()]
     rest = "\n".join(lines[:i])
     return lines[:i] if tail and all(ln in rest for ln in tail) else lines
@@ -444,6 +503,17 @@ def clean_died_text(text: str, max_lines: int = _DIED_MAX_LINES) -> str:
     """
     text = re.sub(r"\?credentials=\w+", "", ESC_RE.sub("", text))
     lines = trim_stack_frames(_squeeze_blank(_drop_redundant_footer(_collapse_zypp(text))))
-    if len(lines) > max_lines:
-        lines = [*lines[:max_lines], f"... ({len(lines) - max_lines} more lines)"]
-    return "\n".join(lines)
+    return "\n".join(_capped(lines, max_lines))
+
+
+def _capped(lines: list[str], max_lines: int) -> list[str]:
+    return [*lines[:max_lines], f"... ({len(lines) - max_lines} more lines)"] if len(lines) > max_lines else lines
+
+
+def split_died_text(text: str, max_lines: int = _DIED_BODY_LINES) -> tuple[list[str], list[str]]:
+    """Return a failure text's cleaned message lines and the lines after its `--- # stack trace` marker, each capped."""
+    if not text.strip():
+        return [], []
+    lines = clean_died_text(text, len(text.split("\n"))).split("\n")
+    i = lines.index(_STACK_TRACE_MARK) if _STACK_TRACE_MARK in lines else len(lines)
+    return _capped(lines[:i], max_lines), _capped(lines[i + 1 :], max_lines)

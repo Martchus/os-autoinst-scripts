@@ -8,27 +8,28 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from .failures import (
-    CLUSTER_MAX,
     CLUSTER_STEPS_SHOWN,
-    STEP_GROUP_MAX,
-    collapse_repeated_clusters,
     extract_failed_modules,
     extract_test_died_errors,
+    failing_cluster,
+    failing_command_line,
+    failing_step,
     get_context_steps,
-    group_failures_by_proximity,
     group_repeated_failures,
+    is_command_step,
     is_noise_step,
+    is_record_info,
     is_secondary,
-    module_cmd_lines,
     module_key,
     post_fail_start,
+    previous_modules,
     repeat_note,
-    secondary_line,
     xfstests_lines,
 )
 from .history import fetch_job, job_header, run_history
 from .http import AnalyzerError, NoFailedModulesError
 from .logs import (
+    command_output,
     dialog_signal,
     find_in_log,
     find_log_range,
@@ -43,16 +44,18 @@ from .logs import (
     summarize_key_error,
 )
 from .text import (
-    clean_died_text,
     condense_log,
     extract_search_string_from_step,
     filter_text_data_lines,
     format_step_summary_line,
+    has_command,
     ipa_search_key,
     parse_command_from_test_died,
     parse_command_from_text_data,
-    parse_exit_code_from_text_data,
+    record_info_body,
     redact,
+    split_died_text,
+    step_output_tail,
 )
 from .uploads import (
     collect_job_level_logs,
@@ -66,10 +69,18 @@ if TYPE_CHECKING:
     from .http import JsonDict, OpenQA
 
 _RULE = "=" * 80
-_STEPS_BEFORE_SCAN = 20
-_STEPS_AFTER_SCAN = 10
-_STEPS_BEFORE_SHOWN = 5
+_STEPS_BEFORE_SCAN = 70
+_STEPS_AFTER_SCAN = 30
+_AFTER_COMMANDS = 3
+_FAILING_OUTPUT_LINES = 50
+_STEPS_BEFORE_SHOWN = 20
 _STEPS_AFTER_SHOWN = 3
+_OUTPUT_STEPS = 5
+_RECORD_INFO_FULL = 5
+_RECORD_INFO_FULL_LINES = 30
+_RECORD_INFO_BRIEF_LINES = 2
+_AUTOINST_STEPS_BEFORE = 5
+_FAILURE_MARKER = "  >>> The next step is the one that failed the test <<<"
 _RETRIES_SHOWN = 5
 _PUBLICCLOUD_CONTEXT_AFTER = 5
 _LOGIN_PROMPT_TAIL_LINES = 10
@@ -150,98 +161,175 @@ def _needle_context(job: _Job, needle: str) -> list[str]:
     return out
 
 
-def _died_step(job: _Job, detail: JsonDict, category: str | None) -> list[str]:
+def _died_step(job: _Job, detail: JsonDict, category: str | None) -> tuple[list[str], list[str]]:
+    """Return the died step's message (plus its command's output) and the sections that follow the step context."""
     text_data = detail.get("text_data") or ""
-    out = ["*** TEST DIED ERROR ***", "", f"Error in step #{detail.get('num', '?')}:"]
-    out += [redact(clean_died_text(text_data)), ""]
+    body, trace = split_died_text(text_data)
+    sections = _section("Stack trace", _masked(trace)) if trace else []
     if category == "publiccloud":
-        return out + _publiccloud_context(job)
+        return body, sections + _publiccloud_context(job)
     needle = _NEEDLE_RE.search(text_data)
     if needle and job.autoinst:
-        return out + _needle_context(job, needle.group(0))
+        return body, sections + _needle_context(job, needle.group(0))
     if command := parse_command_from_test_died(text_data):
+        if output := command_output(job.serial, command, _FAILING_OUTPUT_LINES):
+            return body + output, sections
         context = find_in_log(job.serial, command, job.context_lines, job.context_lines)
-        return out + (
+        found = (
             _section(f"Serial Terminal Log (searching for: {command})", format_log_context(context)) if context else []
         )
-    return out + _serial_tail(job)
+        return body, sections + found
+    return body, sections + _serial_tail(job)
 
 
-def _wait_serial_step(job: _Job, detail: JsonDict) -> list[str]:
+def _wait_serial_step(job: _Job, detail: JsonDict) -> tuple[list[str], list[str]]:
     text_data = detail.get("text_data") or ""
+    if output := step_output_tail(text_data, _FAILING_OUTPUT_LINES):
+        return output, []
     command = parse_command_from_text_data(text_data)
-    exit_code = parse_exit_code_from_text_data(text_data)
-    out = [f"Failed Command #{detail.get('num', '?')}:"]
-    out.append(f"  {redact(command)}" if command else "  (Could not parse command)")
-    if exit_code is not None:
-        out.append(f"  Exit code: {exit_code}")
-    out.append("")
     context = find_in_log(job.serial, command, job.context_lines) if command else None
     if context:
-        return out + _section(
-            f"Serial Terminal Log ({job.context_lines} lines before/after)", format_log_context(context)
-        )
-    return [*out, "Text data from test details:", redact(filter_text_data_lines(text_data)), ""]
+        title = f"Serial Terminal Log ({job.context_lines} lines before/after)"
+        return [], _section(title, format_log_context(context))
+    return filter_text_data_lines(text_data).split("\n"), []
 
 
-def _other_step(job: _Job, detail: JsonDict, cluster: list[JsonDict]) -> list[str]:
+def _other_step(job: _Job, detail: JsonDict, cluster: list[JsonDict]) -> tuple[list[str], list[str]]:
     text_data = detail.get("text_data") or ""
-    if (
-        not text_data
-        and detail.get("screenshot")
-        and any("# Test died:" in (d.get("text_data") or "") for d in cluster)
-    ):
-        return []
-    out = [
-        "*** STEP FAILURE ***",
-        "",
-        f"Failure in step #{detail.get('num', '?')}: {detail.get('display_title', 'Unknown')}",
-    ]
     if text_data:
-        out.append(redact(clean_died_text(text_data)))
-    out.append("")
-    return out if text_data else out + _serial_tail(job)
+        body, trace = split_died_text(text_data)
+        return body, _section("Stack trace", _masked(trace)) if trace else []
+    bare_screen = detail.get("screenshot") and any("# Test died:" in (d.get("text_data") or "") for d in cluster)
+    return ([], []) if bare_screen else ([], _serial_tail(job))
 
 
-def _step_report(
-    job: _Job, detail: JsonDict, repeats: list[int], cluster: list[JsonDict], category: str | None
-) -> list[str]:
-    out = [repeat_note(repeats)] if repeats else []
-    if "# Test died:" in (detail.get("text_data") or ""):
-        return out + _died_step(job, detail, category)
-    if detail.get("display_title") == "wait_serial":
-        return out + _wait_serial_step(job, detail)
-    return out + _other_step(job, detail, cluster)
+def _step_bodies(job: _Job, cluster: list[JsonDict], category: str | None) -> tuple[dict[int, list[str]], list[str]]:
+    """Return the text shown under the failing and the died step in the step context, and the sections after it."""
+    failing = failing_step(cluster)
+    died = next((d for d in reversed(cluster) if "# Test died:" in (d.get("text_data") or "")), None)
+    bodies: dict[int, list[str]] = {}
+    sections: list[str] = []
+    for step in (d for d in cluster if d is failing or d is died):
+        if step is died:
+            body, extra = _died_step(job, step, category)
+        elif step.get("display_title") == "wait_serial":
+            body, extra = _wait_serial_step(job, step)
+        else:
+            body, extra = _other_step(job, step, cluster)
+        bodies[id(step)] = body
+        sections += extra
+    return bodies, sections
+
+
+def _repeat_notes(cluster: list[JsonDict], shown: list[JsonDict]) -> list[str]:
+    """Return a note for each group of identical failures that has a step in `shown`."""
+    notes = []
+    for first, repeats in group_repeated_failures(cluster):
+        nums = [first.get("num", 0), *repeats]
+        own = next((s.get("num", 0) for s in shown if s.get("num", 0) in nums), None)
+        if own is not None and repeats:
+            notes.append(repeat_note([n for n in nums if n != own]))
+    return notes
+
+
+def _step_lines(step: JsonDict, *, output: bool, info_lines: int, fail_label: str, failure: list[str]) -> list[str]:
+    """Render a step: record_info as title plus `info_lines` body lines, a command with its output tail if `output`.
+
+    `failure` is the text under a failing step; its first line is dropped when the step line already shows it.
+    """
+    if is_record_info(step):
+        head = f"#{step.get('num', '?')}  {' '.join(str(step['display_title']).split())}"
+        body = record_info_body(step["text_data"], info_lines)
+    else:
+        head = format_step_summary_line(step, fail_label)
+        body = [ln for ln in failure if ln.strip()]
+        if body and body[0] in head:
+            body = body[1:]
+        body = body or (step_output_tail(step.get("text_data") or "") if output else [])
+    return [f"  {redact(head)}", *(f"    {redact(ln)}" for ln in body)]
+
+
+def _marker_step(shown: list[JsonDict], failing: JsonDict) -> JsonDict | None:
+    """Return the step the failure marker goes before: the failing one or the bare failed screens above it."""
+    idx = next((i for i, d in enumerate(shown) if d is failing), None)
+    if idx is None:
+        return None
+    while idx and shown[idx - 1].get("result") == "fail" and not shown[idx - 1].get("text_data"):
+        idx -= 1
+    return shown[idx]
+
+
+def _fail_label(step: JsonDict, cluster: list[JsonDict], post_start: int | None) -> str:
+    if any(d is step for d in cluster):
+        return "FAIL"
+    return "FAIL, post-fail hook" if is_secondary(step, post_start) else "FAIL, non-fatal"
 
 
 def _step_context(
-    all_details: list[JsonDict], cluster: list[JsonDict], before: list[JsonDict], after: list[JsonDict]
+    all_details: list[JsonDict],
+    cluster: list[JsonDict],
+    before: list[JsonDict],
+    after: list[JsonDict],
+    bodies: dict[int, list[str]],
 ) -> list[str]:
-    """Render the steps around a cluster; a long cluster keeps only its first and last steps."""
+    """Render the steps around a cluster; a long cluster keeps only its first and last steps and those with a body.
+
+    The newest commands before the cluster show their output tail, the newest record_info steps (and those after
+    the cluster) their body; older ones are reduced to a line or two. `bodies` holds the text under failing steps.
+    """
     low, high = cluster[0].get("num", 0), cluster[-1].get("num", 0)
     steps = [d for d in all_details if low <= d.get("num", 0) <= high]
     half = CLUSTER_STEPS_SHOWN // 2
-    omitted = max(0, len(steps) - 2 * half)
-    if omitted:
-        steps = steps[:half] + steps[-half:]
-    window = before + steps + after
-    out = ["Step context:"]
-    for i, step in enumerate(window):
-        if omitted and i == len(before) + half:
-            out.append(f"  ... ({omitted} steps omitted)")
-        out.append(f"  {redact(format_step_summary_line(step))}")
+    shown = before + steps + after
+    marker = _marker_step(shown, failing_step(cluster))
+    hidden = {id(d) for d in steps[half:-half]} - bodies.keys() - {id(marker)} if len(steps) > 2 * half else set()
+    with_output = {id(d) for d in [d for d in before if is_command_step(d)][-_OUTPUT_STEPS:]}
+    with_info = {id(d) for d in [d for d in before if is_record_info(d)][-_RECORD_INFO_FULL:]}
+    with_info |= {id(d) for d in after}
+    with_output |= {id(d) for d in after if has_command(d.get("text_data") or "")}
+    post_start = post_fail_start(all_details)
+    out = [f"Step context (last {_STEPS_BEFORE_SHOWN} command/needle/record_info steps)"]
+    skipped = 0
+    for step in shown:
+        if id(step) in hidden:
+            skipped += 1
+            continue
+        if skipped:
+            out.append(f"  ... ({skipped} steps omitted)")
+            skipped = 0
+        if step is marker:
+            out.append(_FAILURE_MARKER)
+        info_lines = _RECORD_INFO_FULL_LINES if id(step) in with_info else _RECORD_INFO_BRIEF_LINES
+        out += _step_lines(
+            step,
+            output=id(step) in with_output,
+            info_lines=info_lines,
+            fail_label=_fail_label(step, cluster, post_start),
+            failure=bodies.get(id(step), []),
+        )
     return [*out, ""]
 
 
 def _autoinst_range(job: _Job, cluster: list[JsonDict], before: list[JsonDict], after: list[JsonDict]) -> list[str]:
-    """Show the autoinst-log.txt range spanning the context steps and the cluster."""
+    """Show the autoinst-log.txt range spanning the last context steps and the cluster."""
     if not job.autoinst:
         return []
-    start = extract_search_string_from_step(before[0] if before else cluster[0])
+    anchors = (*before[-_AUTOINST_STEPS_BEFORE:], cluster[0])
+    start = next((s for d in anchors if (s := extract_search_string_from_step(d))), None)
     end = extract_search_string_from_step(after[-1] if after else cluster[-1])
     log_range = find_log_range(job.autoinst, start, end, max_lines=2 * job.context_lines)
     lines = condense_log(log_range or [], autoinst=True, max_lines=job.context_lines)
     return _section("autoinst-log.txt (step context)", _masked(lines)) if lines else []
+
+
+def _steps_until_commands(steps: list[JsonDict], n: int) -> list[JsonDict]:
+    """Return `steps` up to and including the `n`-th one that ran a command."""
+    seen = 0
+    for i, step in enumerate(steps):
+        seen += has_command(step.get("text_data") or "")
+        if seen >= n:
+            return steps[: i + 1]
+    return steps
 
 
 def _cluster_report(
@@ -260,44 +348,37 @@ def _cluster_report(
         after=_STEPS_AFTER_SCAN,
     )
     before = [d for d in before if not is_noise_step(d)][-_STEPS_BEFORE_SHOWN:]
-    after = [d for d in after if not is_noise_step(d)][:_STEPS_AFTER_SHOWN]
-    out += _step_context(all_details, cluster, before, after) + _autoinst_range(job, cluster, before, after)
-    for detail, repeats in group_repeated_failures(cluster)[:STEP_GROUP_MAX]:
-        out += _step_report(job, detail, repeats, cluster, category)
-    return out
+    after = _steps_until_commands([d for d in after if not is_noise_step(d)], _AFTER_COMMANDS)
+    bodies, sections = _step_bodies(job, cluster, category)
+    out += _repeat_notes(cluster, [d for d in cluster if id(d) in bodies])
+    out += _step_context(all_details, cluster, before, after, bodies)
+    out += _autoinst_range(job, cluster, before, after[:_STEPS_AFTER_SHOWN])
+    return out + sections
 
 
-def _module_report(job: _Job, module: JsonDict, uploads: dict[str, list[str]]) -> list[str]:
+def _previous_modules_line(all_modules: list[JsonDict], module: JsonDict) -> str:
+    previous = previous_modules(all_modules, module)
+    listed = ", ".join(f"{_module_title(m)} ({m.get('result', 'unknown')})" for m in previous)
+    return f"Previous modules: {listed or 'none (first module)'}"
+
+
+def _module_report(
+    job: _Job, module: JsonDict, uploads: dict[str, list[str]], all_modules: list[JsonDict]
+) -> list[str]:
     category = module.get("category")
     all_details = module.get("details", [])
     out = [_RULE, f"Failed Module: {_module_title(module)}", _RULE, ""]
-    out += module_cmd_lines(all_details)
-    step_results = [d.get("result") for d in all_details]
-    n_fail, n_soft = step_results.count("fail"), step_results.count("softfail")
-    if n_fail > 1 or n_soft:
-        out += [f"Steps: {n_fail} failed / {n_soft} softfailed", ""]
-    post_start = post_fail_start(all_details)
-    clusters = [
-        c
-        for cl in group_failures_by_proximity(all_details)
-        if (c := [d for d in cl if not is_secondary(d, post_start)])
-    ]
-    secondary = [
-        d for d in all_details if d.get("result") == "fail" and d.get("text_data") and is_secondary(d, post_start)
-    ]
+    out += [_previous_modules_line(all_modules, module), ""]
+    failing = failing_cluster(all_details)
+    if failing and (line := failing_command_line(failing[0])):
+        out += [redact(line), ""]
     # xfstests keep their failure information in record_info steps, IPA test cases in the serial log
-    if not clusters and category == "xfstests":
+    if not failing and category == "xfstests":
         return out + xfstests_lines(all_details)
     if category == "IPA":
         return out + _ipa_report(job, all_details, module.get("name", "unknown"))
-    collapsed = collapse_repeated_clusters(clusters)
-    for cluster, retries in collapsed[:CLUSTER_MAX]:
-        out += _cluster_report(job, all_details, cluster, retries, category)
-    if len(collapsed) > CLUSTER_MAX:
-        out += [f"... ({len(collapsed) - CLUSTER_MAX} more clusters omitted)", ""]
-    out += [redact(secondary_line(sec, repeats)) for sec, repeats in group_repeated_failures(secondary)]
-    if secondary:
-        out.append("")
+    if failing:
+        out += _cluster_report(job, all_details, *failing, category)
     return out + format_uploaded_logs(uploads)
 
 
@@ -355,8 +436,7 @@ def _preamble(
 def _analyze(  # ruff: ignore[too-many-arguments]
     oqa: OpenQA, job_id: str, context_lines: int, out: list[str], api_job: JsonDict | None, *, include_softfailed: bool
 ) -> None:
-    out += [f"OpenQA Job Analysis: {oqa.server}/t{job_id}", ""]
-    out.append(f"Fetching test details from {oqa.server}/tests/{job_id}/details_ajax...")
+    out += [f"OpenQA {'Failed/Softfailed' if include_softfailed else 'Failed'} Job Analysis:", ""]
     details_json = oqa.json(f"/tests/{job_id}/details_ajax")
     failed_modules = extract_failed_modules(details_json, include_softfailed=include_softfailed)
     api_job = api_job or fetch_job(oqa, job_id)
@@ -373,7 +453,7 @@ def _analyze(  # ruff: ignore[too-many-arguments]
     out += lines
     job = replace(job, booted_to_login=booted)
     for module in failed_modules[:_MODULES_MAX]:
-        out += _module_report(job, module, uploads[module_key(module)])
+        out += _module_report(job, module, uploads[module_key(module)], details_json.get("modules", []))
     if rest := failed_modules[_MODULES_MAX:]:
         names = ", ".join(m.get("name", "unknown") for m in rest)
         out += [f"... {len(rest)} more failed modules not analyzed: {names}", ""]

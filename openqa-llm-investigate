@@ -50,10 +50,7 @@ Job details:
 - Flavor: {flavor}
 - Result: {result}{prompt_extension_text}
 
-Investigation info (diff to last good):
-{investigation_info}
-
-Failure analysis (context window of {context_lines} lines{truncated}):
+{investigation_section}Failure analysis (context window of {context_lines} lines{truncated}):
 {analysis}
 
 You will get a few short questions about this failure. Answer each exactly as asked and nothing else.
@@ -539,6 +536,17 @@ def _verdict_question(stats: dict[str, Any], opts: Options) -> str:
     return VERDICT_QUESTION.format(hint=hint, **stats)
 
 
+def _investigation_text(diff: Any) -> str:  # ruff: ignore[any-type]
+    """Return the redacted diff to the last good job as text (empty if openQA has none)."""
+    if not diff:
+        return ""
+    return redact(diff if isinstance(diff, str) else json.dumps(diff, indent=2))
+
+
+def _investigation_section(info: str) -> str:
+    return f"Investigation info (diff to last good):\n{info.rstrip()}\n\n" if info.strip() else ""
+
+
 def _build_prompt(job: dict[str, Any], analysis: str, stats: dict[str, Any], opts: Options) -> str:
     settings = job.get("settings", {})
     failed_modules = [m.get("name", "unknown") for m in job.get("testresults", []) if m.get("result") == "failed"]
@@ -560,7 +568,7 @@ def _build_prompt(job: dict[str, Any], analysis: str, stats: dict[str, Any], opt
         "context_lines": opts.context_lines,
         "analysis": analysis,
         "truncated": TRUNCATED_NOTE.format(log_lines=opts.log_lines) if truncated else "",
-        "investigation_info": stats["investigation_info"],
+        "investigation_section": _investigation_section(stats["investigation_info"]),
         "prompt_extension_text": extension_text,
     }
     return INTRO_TEMPLATE.format(**(_fit_context(fields, opts) if opts.context_tokens else fields))
@@ -585,7 +593,7 @@ def _gather_stats(
         "build_failures": build_failures,
         "same_module_failures": same_module_failures,
         "consecutive_failures": consecutive_str,
-        "investigation_info": redact(json.dumps(investigation.get("diff_to_last_good", "None available"))),
+        "investigation_info": _investigation_text(investigation.get("diff_to_last_good")),
     }, job_found
 
 

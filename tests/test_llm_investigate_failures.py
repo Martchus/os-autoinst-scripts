@@ -6,6 +6,8 @@ from __future__ import annotations
 import operator
 from typing import Any
 
+import pytest
+
 from openqa_llm_investigate import failures as fl
 
 
@@ -356,290 +358,116 @@ def test_extract_xfstests_result_steps_preserves_forward_order() -> None:
     ]
 
 
-def test_build_module_cmd_list_wait_serial_with_exit_code() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: zypper install foo\n# Exit code: 3\n",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert entries[0] == ("zypper install foo", "3")
+_STEP_COMMANDS = [
+    ("wait_serial", "# Command: zypper install foo\n# Exit code: 3\n", ("zypper install foo", "3")),
+    ("wait_serial", "# Command: systemctl start foo.service\n", ("systemctl start foo.service", None)),
+    (
+        "wait_serial",
+        "# Command: echo Y1dRv; bash -oe pipefail /tmp/host.sh\n# wait_serial expected: guestregister\n# Exit code: 3",
+        ("guestregister", "3"),
+    ),
+    (
+        "wait_serial",
+        '# Command: echo tY~XN; bash -oe pipefail /tmp/scripttY~HOST.sh\n# wait_serial expected: "guestregister"\n',
+        ("guestregister", None),
+    ),
+    ("wait_serial", "# Command: echo M98FO; bash -oe pipefail /tmp/scriptM98FO.sh\n", None),
+    (
+        "wait_serial",
+        "# Command: echo M98FO; bash -oe pipefail /tmp/scriptM98FO.sh\n# Exit code: 254\n",
+        ("(exit 254)", "254"),
+    ),
+    ("assert_screen", "# Test died:\ncommand 'zypper ref' timed out", ("zypper ref", None)),
+    ("assert_screen", "something", ("assert_screen", None)),
+    (
+        "assert_screen",
+        "Needle 'login_screen, login_screen-dark' not found",
+        ("assert_screen('login_screen, login_screen-dark')", None),
+    ),
+    (
+        "assert_screen",
+        "no candidate needle with tag(s) 'agama-product' matched",
+        ("assert_screen('agama-product')", None),
+    ),
+    ("check_screen", "Needle 'some_needle' not found", ("check_screen('some_needle')", None)),
+    ("", "", None),
+]
 
 
-def test_build_module_cmd_list_wait_serial_without_exit_code() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: systemctl start foo.service\n",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert entries[0] == ("systemctl start foo.service", None)
+@pytest.mark.parametrize(("title", "text", "expected"), _STEP_COMMANDS)
+def test_step_command(title: str, text: str, expected: tuple[str, str | None] | None) -> None:
+    assert fl._step_command({"num": 1, "result": "fail", "display_title": title, "text_data": text}) == expected
 
 
-def test_build_module_cmd_list_boilerplate_skipped_falls_through_to_marker() -> None:
-    """Boilerplate echo TOKEN; bash ... /tmp/... commands are excluded."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": (
-                "# Command: echo Y1dRv; bash -oe pipefail /tmp/host.sh\n"
-                '# wait_serial expected: "guestregister"\n'
-                "# Exit code: 3\n"
-            ),
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    # Falls through to the wait_serial expected marker
-    assert entries[0][0] == "guestregister"
+def _fail(num: int, title: str, text: str) -> dict[str, Any]:
+    return {"num": num, "result": "fail", "display_title": title, "text_data": text}
 
 
-def test_build_module_cmd_list_boilerplate_old_pattern_also_skipped() -> None:
-    """Old-style echo TOKEN; bash .../tmp/scriptTOKEN.sh also excluded."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: echo M98FO; bash -oe pipefail /tmp/scriptM98FO.sh\n",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert entries == []
+def test_failing_command_line_command_with_exit_code() -> None:
+    step = _fail(1, "wait_serial", "# Command: zypper install foo\n# Exit code: 3\n")
+    assert fl.failing_command_line([step]) == 'The module has been failed by: "zypper install foo" command (exit 3).'
 
 
-def test_build_module_cmd_list_test_died_command_included() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "assert_screen",
-            "text_data": "# Test died:\ncommand 'zypper ref' timed out",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert "zypper ref" in entries[0][0]
-    assert entries[0][1] is None  # no exit code for test_died
+def test_failing_command_line_died_command_has_no_exit_code() -> None:
+    step = _fail(1, "Failed", "# Test died: 'zypper ref' failed with code 4\n")
+    assert fl.failing_command_line([step]) == 'The module has been failed by: "zypper ref" command.'
 
 
-def test_build_module_cmd_list_other_failure_uses_display_title() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "assert_screen",
-            "text_data": "something",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert entries[0] == ("assert_screen", None)
+def test_failing_command_line_needle_check() -> None:
+    step = _fail(1, "Failed", "# Test died: no candidate needle with tag(s) 'a, b' matched\n")
+    expected = "The module has been failed by: \"no candidate needle with tag(s) 'a, b'\" needle check."
+    assert fl.failing_command_line([step]) == expected
 
 
-def test_build_module_cmd_list_deduplication_by_command() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: zypper install foo\n# Exit code: 1\n",
-        },
-        {
-            "num": 2,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: zypper install foo\n# Exit code: 1\n",
-        },
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
+def test_failing_command_line_marker_and_plain_step() -> None:
+    marker = _fail(1, "wait_serial", "# wait_serial expected: qr/login:/\n# Result:\n")
+    assert fl.failing_command_line([marker]) == 'The module has been failed by: "qr/login:/" wait_serial marker.'
+    assert fl.failing_command_line([_fail(1, "Conflict", "x")]) == 'The module has been failed by: "Conflict" step.'
 
 
-def test_build_module_cmd_list_non_failing_steps_ignored() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "ok",
-            "display_title": "wait_serial",
-            "text_data": "# Command: ok cmd\n",
-        },
-        {
-            "num": 2,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: fail cmd\n",
-        },
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert "fail cmd" in entries[0][0]
+def test_failing_command_died_step_wins_over_later_plain_failure() -> None:
+    died = _fail(1, "Failed", "# Test died: 'zypper ref' failed with code 4\n")
+    later = _fail(2, "wait_serial", "# Command: later\n# Exit code: 1\n")
+    assert (found := fl.failing_command([died, later]))
+    assert found[1] == "zypper ref"
+    assert fl.failing_step([died, later]) is died
 
 
-def test_build_module_cmd_list_empty_details() -> None:
-    assert fl.build_module_cmd_list([]) == []
+def test_failing_command_walks_back_when_the_died_step_has_no_command() -> None:
+    marker = _fail(1, "wait_serial", "# wait_serial expected: qr/login:/\n# Result:\n")
+    died = _fail(2, "Failed", "# Test died: Could not find login prompt\n")
+    assert (found := fl.failing_command([marker, died]))
+    assert found[0] is marker
+    assert fl.failing_step([marker, died]) is marker
 
 
-def test_build_module_cmd_list_boilerplate_tilde_token_skipped() -> None:
-    r"""Boilerplate with non-word token (tY~XN) is filtered by broadened \\S+ regex."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": (
-                "# Command: echo tY~XN; bash -oe pipefail /tmp/scripttY~HOST.sh\n"
-                '# wait_serial expected: "guestregister"\n'
-                "# Exit code: 3\n"
-            ),
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert entries[0][0] == "guestregister"
-    assert "echo tY" not in entries[0][0]
+def test_failing_step_without_a_command_is_the_died_or_last_step() -> None:
+    died = _fail(1, "", "# Test died: boom\n")
+    last = _fail(2, "", "")
+    assert fl.failing_step([died, last]) is died
+    assert fl.failing_step([_fail(1, "", ""), last]) is last
 
 
-def test_build_module_cmd_list_boilerplate_only_with_exit_code_emits_synthetic() -> None:
-    """When command is boilerplate-only and no wait_serial expected, exit code used."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": ("# Command: echo M98FO; bash -oe pipefail /tmp/scriptM98FO.sh\n# Exit code: 254\n"),
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    cmd, exit_code = entries[0]
-    assert cmd == "(exit 254)"
-    assert exit_code == "254"
+def test_failing_cluster_is_the_last_primary_cluster() -> None:
+    first = _fail(1, "wait_serial", "# Command: setterm -blank 0\n# Exit code: 1\n")
+    last = _fail(20, "Failed", "# Test died: 'zypper ref' failed with code 4\n")
+    post = _fail(29, "wait_serial", "# Command: test -x /usr/bin/logger\n# Exit code: 1\n")
+    marker = {"num": 28, "result": "unk", "display_title": "Post-fail"}
+    assert fl.failing_cluster([first, last, marker, post]) == ([last], [])
 
 
-def test_build_module_cmd_list_assert_screen_needle_tag_extracted() -> None:
-    """assert_screen with needle tags in text_data yields assert_screen('tags') token."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "assert_screen",
-            "text_data": "Needle 'login_screen, login_screen-dark' not found within 90 seconds",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    cmd, exit_code = entries[0]
-    assert cmd == "assert_screen('login_screen, login_screen-dark')"
-    assert exit_code is None
+def test_failing_cluster_keeps_retry_nums() -> None:
+    steps = [_fail(n, "Failed", "boom") for n in (1, 20, 40)]
+    assert fl.failing_cluster(steps) == ([steps[2]], [1, 20])
 
 
-def test_build_module_cmd_list_assert_screen_no_candidate_needle_extracted() -> None:
-    """assert_screen with 'no candidate needle with tag(s)' form is extracted."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "assert_screen",
-            "text_data": "no candidate needle with tag(s) 'agama-product' matched within 30s",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert entries[0][0] == "assert_screen('agama-product')"
+def test_failing_cluster_none_without_primary_failures() -> None:
+    assert fl.failing_cluster([]) is None
+    assert fl.failing_cluster([{"num": 1, "result": "ok", "display_title": "t"}]) is None
 
 
-def test_build_module_cmd_list_assert_screen_no_tags_falls_back_to_display_title() -> None:
-    """assert_screen with no tag info in text_data falls back to the title."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "assert_screen",
-            "text_data": "some unrelated message",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert len(entries) == 1
-    assert entries[0][0] == "assert_screen"
-
-
-def test_build_module_cmd_list_check_screen_needle_tag_extracted() -> None:
-    """check_screen also participates in needle-tag extraction."""
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "check_screen",
-            "text_data": "Needle 'some_needle' not found",
-        }
-    ]
-    entries = fl.build_module_cmd_list(details)
-    assert entries[0][0] == "check_screen('some_needle')"
-
-
-def test_module_cmd_lines_emits_cmd_lines() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: zypper install foo\n# Exit code: 3\n",
-        }
-    ]
-    lines = fl.module_cmd_lines(details)
-    out = "\n".join(lines)
-    assert "# Cmd[1]: zypper install foo (exit 3)" in out
-
-
-def test_module_cmd_lines_emits_multiple_cmd_lines() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: cmd-a\n# Exit code: 1\n",
-        },
-        {
-            "num": 2,
-            "result": "fail",
-            "display_title": "wait_serial",
-            "text_data": "# Command: cmd-b\n# Exit code: 2\n",
-        },
-    ]
-    lines = fl.module_cmd_lines(details)
-    out = "\n".join(lines)
-    assert "# Cmd[1]: cmd-a (exit 1)" in out
-    assert "# Cmd[2]: cmd-b (exit 2)" in out
-
-
-def test_module_cmd_lines_no_exit_code_omitted_from_suffix() -> None:
-    details = [
-        {
-            "num": 1,
-            "result": "fail",
-            "display_title": "assert_screen",
-            "text_data": "something",
-        }
-    ]
-    lines = fl.module_cmd_lines(details)
-    out = "\n".join(lines)
-    assert "# Cmd[1]: assert_screen" in out
-    assert "(exit" not in out
-
-
-def test_module_cmd_lines_empty_details_emits_nothing() -> None:
-    lines = fl.module_cmd_lines([])
-    assert not lines
+def test_failing_command_line_none_without_a_command() -> None:
+    assert fl.failing_command_line([_fail(1, "", "")]) is None
 
 
 def _repeated_failures_step(num: Any, text: Any, title: Any = "Unknown issue") -> Any:
@@ -662,16 +490,18 @@ def test_repeated_failures_repeat_note_truncates() -> None:
     assert "repeats 10 more times: #10, #11, #12, #13, #14, ... (+5)" in note
 
 
-def test_noise_steps_housekeeping_and_bare_screenshots_are_noise() -> None:
-    scp = {"num": 1, "result": "ok", "text_data": "# Command: scp a b\n# Result:"}
-    curl = {
-        "num": 2,
-        "result": "ok",
-        "text_data": "# Command: curl --form upload=@x http://h/uploadlog/z",
-    }
+def test_noise_steps_script_transfer_and_bare_screenshots_are_noise() -> None:
+    fetch = {"num": 1, "result": "ok", "text_data": "# Command: curl -f -v http://h:1/tok/current_script > /tmp/s.sh"}
+    clear = {"num": 2, "result": "ok", "text_data": "# Command: clear\n# Result:"}
     shot = {"num": 3, "result": "ok", "screenshot": "x.png"}
-    for step in (scp, curl, shot):
+    for step in (fetch, clear, shot):
         assert fl.is_noise_step(step)
+
+
+def test_noise_steps_scp_rm_upload_and_needle_matches_are_kept() -> None:
+    for cmd in ("scp a b", "rm -rf /tmp/x", "test -d /x && rm -rf /x", "curl --form upload=@x http://h/uploadlog/z"):
+        assert not fl.is_noise_step({"result": "ok", "text_data": f"# Command: {cmd}\n# Result:"})
+    assert not fl.is_noise_step({"result": "ok", "screenshot": "x.png", "needle": "n-2026"})
 
 
 def test_noise_steps_failing_or_real_steps_are_not_noise() -> None:
@@ -680,9 +510,26 @@ def test_noise_steps_failing_or_real_steps_are_not_noise() -> None:
     assert not fl.is_noise_step({"result": "ok", "text_data": "plain", "display_title": "t"})
 
 
-def test_secondary_failures_repeated_secondary_counted() -> None:
-    step = {"num": 4, "display_title": "x", "text_data": "# Post fail hook died: a"}
-    assert fl.secondary_line(step, [5]).endswith("a (x2)")
+def test_is_record_info() -> None:
+    assert fl.is_record_info({"result": "ok", "display_title": "ip a", "text_data": "1: lo\n2: eth0"})
+    assert not fl.is_record_info({"result": "fail", "display_title": "t", "text_data": "x"})
+    assert not fl.is_record_info({"result": "ok", "display_title": "", "text_data": "x"})
+    assert not fl.is_record_info({"result": "ok", "display_title": "t", "text_data": "  \n"})
+    assert not fl.is_record_info({"result": "ok", "display_title": "wait_serial", "text_data": "# Result:\nx"})
+
+
+def test_is_command_step() -> None:
+    assert fl.is_command_step({"text_data": "# Command: ls\n# Result:\nls\n"})
+    assert not fl.is_command_step({"text_data": "plain"})
+    assert not fl.is_command_step({})
+
+
+def test_previous_modules_by_identity_with_repeated_names() -> None:
+    mods = [{"name": n} for n in ("a", "pytest", "pytest", "pytest", "b")]
+    assert fl.previous_modules(mods, mods[4]) == mods[1:4]
+    assert fl.previous_modules(mods, mods[2]) == mods[0:2]
+    assert fl.previous_modules(mods, mods[0]) == []
+    assert fl.previous_modules(mods, {"name": "pytest"}) == []
 
 
 @staticmethod
@@ -694,21 +541,6 @@ def test_collapse_clusters_collapse_keeps_last_with_retry_nums() -> None:
     cl = [[_collapse_clusters_fail(n)] for n in (10, 20, 30)] + [[_collapse_clusters_fail(40, "Other", "x")]]
     res = fl.collapse_repeated_clusters(cl)
     assert [(c[0]["num"], r) for c, r in res] == [(30, [10, 20]), (40, [])]
-
-
-def test_cmd_repeat_comment_repeat_comment_after_entry() -> None:
-    d = [{"num": n, "result": "fail", "display_title": "TFM apply output"} for n in (3, 13, 23)]
-    lines = fl.module_cmd_lines(d)
-    out = lines
-    assert out == [
-        "# Cmd[1]: TFM apply output",
-        "# Cmd[1] repeated 3 times: #3, #13, #23",
-    ]
-
-
-def test_cmd_repeat_comment_single_has_no_comment() -> None:
-    lines = fl.module_cmd_lines([{"num": 3, "result": "fail", "display_title": "T"}])
-    assert lines == ["# Cmd[1]: T"]
 
 
 def test_extract_failed_modules_keeps_modules_without_details() -> None:

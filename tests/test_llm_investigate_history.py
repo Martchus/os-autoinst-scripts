@@ -67,6 +67,7 @@ def test_header_shows_job_metadata_and_counts() -> None:
             "DISTRI": "sle",
             "VERSION": "15-SP7",
             "ARCH": "aarch64",
+            "MACHINE": "64bit",
             "QEMURAM": "2048",
         },
     }
@@ -76,7 +77,7 @@ def test_header_shows_job_metadata_and_counts() -> None:
         "Result: failed (state done)",
         "Reason: boom INTERNAL-USE-ONLY-****-****",
         "Description: A desc",
-        "Settings: DISTRI=sle VERSION=15-SP7 ARCH=aarch64 QEMURAM=2048",
+        "Settings: MACHINE=64bit QEMURAM=2048",
         "Modules: 1 failed / 1 softfailed / 1 skipped",
         "",
     ]

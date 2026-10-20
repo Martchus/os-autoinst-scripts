@@ -843,3 +843,94 @@ def test_condense_log_max_lines_zero_keeps_only_omission_note() -> None:
 
 def test_command_keeps_echo_inside_command() -> None:
     assert txt.parse_command_from_text_data("# Command: do_stuff; echo done\n") == "do_stuff; echo done"
+
+
+_CMD_TEXT = "# Command: ls\n# Result:\nls /x…\n\n{}\n\n# Exit code: 1\n"
+
+
+def test_step_output_tail_keeps_last_lines_with_omission_note() -> None:
+    body = "\n".join(f"line {i}" for i in range(1, 9))
+    assert txt.step_output_tail(_CMD_TEXT.format(body)) == [
+        "... (3 earlier output lines omitted)",
+        *(f"line {i}" for i in range(4, 9)),
+    ]
+
+
+def test_step_output_tail_short_output_has_no_note() -> None:
+    assert txt.step_output_tail(_CMD_TEXT.format("a\n\nb")) == ["a", "b"]
+
+
+def test_step_output_tail_without_output_or_result() -> None:
+    assert txt.step_output_tail(_CMD_TEXT.format("")) == []
+    assert txt.step_output_tail("# Command: scp a b") == []
+    assert txt.step_output_tail("plain text") == []
+
+
+def test_step_output_tail_drops_escapes_and_truncates_long_lines() -> None:
+    long = "\x1b[0mok" + "x" * 300
+    assert txt.step_output_tail(_CMD_TEXT.format(long)) == ["ok" + "x" * 198]
+
+
+def test_record_info_body_caps_lines() -> None:
+    text = "\n".join(f"l{i}" for i in range(5))
+    assert txt.record_info_body(text, 2) == ["l0", "l1", "... (3 more lines)"]
+    assert txt.record_info_body(text, 5) == [f"l{i}" for i in range(5)]
+    assert txt.record_info_body("\n a \n\n", 2) == [" a"]
+
+
+def test_format_step_summary_line_matched_needle() -> None:
+    detail = {"num": 9, "result": "ok", "needle": "n-2026", "area": [{"similarity": 100}], "tags": ["a", "b"]}
+    assert txt.format_step_summary_line(detail) == "#9  screen match  needle: n-2026 (100%)  tags: a, b"
+
+
+def test_format_step_summary_line_failed_screen_step_lists_tags() -> None:
+    detail = {"num": 18, "result": "fail", "screenshot": "s.png", "tags": ["a", "b", "c", "d", "e"]}
+    assert txt.format_step_summary_line(detail) == "#18 [FAIL]  no match for tags: a, b, c (+2)  (screenshot: s.png)"
+
+
+def test_parse_command_from_test_died_failed_with_code() -> None:
+    text = "# Test died: 'zypper -n in -l postfix mailx ' failed with code 4\n\nRelated zypper logs:"
+    assert txt.parse_command_from_test_died(text) == "zypper -n in -l postfix mailx"
+
+
+def test_parse_command_from_test_died_quoted_command_still_wins() -> None:
+    assert txt.parse_command_from_test_died("# Test died: command 'ls /x' failed at foo.pm") == "ls /x"
+
+
+def test_has_command_ignores_the_script_wrapper() -> None:
+    assert txt.has_command("# Command: ls\n# Result:\n")
+    assert not txt.has_command("# Command: echo AbC; bash -oe pipefail /tmp/scriptAbC.sh ; echo SCRIPT_FINISHEDAbC-$?-")
+    assert not txt.has_command("# wait_serial expected: qr/login/")
+
+
+def test_expected_command_escaped_parens_are_not_a_group() -> None:
+    expected = r"qr/Welcome to SUSE Linux Enterprise .*\(s390x\)/u"
+    assert txt._expected_command(expected) == expected
+
+
+def test_expected_command_group_after_escaped_paren_cuts_at_the_group() -> None:
+    assert txt._expected_command(r"qr/a\(b(\d+)/u") == r"a\(b"
+    assert txt._expected_command(r"qr/FtFpg-(\d+)-/u") == "FtFpg-"
+
+
+def test_esc_re_strips_charset_and_keypad_sequences() -> None:
+    assert txt.ESC_RE.sub("", "\x1b[1mroot:~ #\x1b[m\x1b(B \x1b)0\x1b=x\x1b>y") == "root:~ # xy"
+
+
+def test_redact_does_not_mask_across_newlines() -> None:
+    assert txt.redact("Password:\n  #13  wait_serial") == "Password:\n  #13  wait_serial"
+    assert txt.redact("--password\nfoo") == "--password\nfoo"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password=abc def", "password=**** def"),
+        ("password: abc", "password: ****"),
+        ("token : 'abc'", "token : '****'"),
+        ("--password abc x", "--password **** x"),
+        ("--api-key=abc", "--api-key=****"),
+    ],
+)
+def test_redact_same_line_secrets_are_still_masked(text: str, expected: str) -> None:
+    assert txt.redact(text) == expected
