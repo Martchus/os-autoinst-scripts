@@ -43,6 +43,7 @@ APP_ENV_VARS = (
     "test_name",
     "build_regex",
     "machine",
+    "worker_class",
 )
 PASSED_JOB = {"result": "passed", "settings": {"BUILD": "20250101", "HDD_1": "tw.qcow2"}}
 
@@ -81,8 +82,16 @@ def test_scenario_yaml_is_rendered_from_options(scheduled: dict[str, Any]) -> No
     data = yaml.safe_load(scheduled["yaml"])
     assert data["products"]["mm-ping-test"]["arch"] == "aarch64"
     assert data["machines"]["M"]["backend"] == "qemu"
+    assert data["machines"]["M"]["settings"]["WORKER_CLASS"] == "qemu_aarch64,tap"
     assert data["job_templates"]["ping_client"]["machine"] == "M"
     assert data["job_templates"]["ping_client"]["settings"]["PARALLEL_WITH"] == "ping_server"
+
+
+def test_worker_class_can_be_overridden(scheduled: dict[str, Any]) -> None:
+    result = runner.invoke(mm_ping.app, ["--worker-class", "qemu_x86_64,tap,foo"])
+    assert result.exit_code == 0
+    data = yaml.safe_load(scheduled["yaml"])
+    assert data["machines"]["uefi"]["settings"]["WORKER_CLASS"] == "qemu_x86_64,tap,foo"
 
 
 def test_default_machine_is_uefi(scheduled: dict[str, Any]) -> None:
