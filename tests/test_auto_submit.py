@@ -734,6 +734,26 @@ def test_diff_text_has_single_added_block() -> None:
 +"""
     assert auto_submit.diff_text_has_single_added_block(valid_new_file_diff) is True
 
+    # Valid diff with downward alignment from real osc invocation
+    valid_osc_diff_with_separator_on_top = """Index: openQA.changes
+===================================================================
+--- openQA.changes	(revision f138f910c1c9925a98f7c916f124ccc8)
++++ openQA.changes	(working copy)
+@@ -1,4 +1,12 @@
+ -------------------------------------------------------------------
++Wed Aug 20 09:55:39 UTC 2026 - foo@bar
++
++- Update to version 3.14
++  * Change 1
++  * Change 2
++  * Change 3
++
++ -------------------------------------------------------------------
+ Wed Aug 19 09:55:39 UTC 2026 - okurz@suse.com
+
+ - Update to version 5.1787133330.4deef227:"""
+    assert auto_submit.diff_text_has_single_added_block(valid_osc_diff_with_separator_on_top) is True
+
     # Invalid: addition is not at line 1 (e.g. added in the middle of the file)
     diff_added_in_middle = """--- pkg.changes
 +++ pkg.changes
