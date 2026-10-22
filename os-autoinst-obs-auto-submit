@@ -828,7 +828,42 @@ class AutoSubmitter:
         except Exception as e:  # ruff: ignore[blind-except]
             log.warning("Failed to write updated _service file: %s", e)
 
-    def update_package(  # ruff: ignore[complex-structure]
+    def _create_submit_requests(self, package: str, version: str) -> bool:
+        """Create OBS/Git submit requests for all targets."""
+        success = True
+        for target in self.targets:
+            if target == "none" or not target:
+                continue
+            if self.has_pending_submission(package, target):
+                continue
+            log.info("## Ready to submit %s to %s ##", package, target)
+            git_branch = git_branches.get(target)
+            if git_branch:
+                git_dir = self.dir / "git-repos"
+                if not self.dry_run:
+                    git_dir.mkdir(exist_ok=True)
+                    os.chdir(git_dir)
+
+                res_submit = self.make_git_submit_request(
+                    package=package,
+                    version=version,
+                    branch=git_branch,
+                )
+            else:
+                dst_dir = self.dir / self.dst_project / package
+                os.chdir(dst_dir)
+
+                res_submit = self.make_obs_submit_request(
+                    package=package,
+                    target=target,
+                    version=version,
+                )
+            if not res_submit:
+                success = False
+                self.failed_packages.append(package)
+        return success
+
+    def update_package(
         self,
         package: str,
     ) -> bool:
@@ -863,41 +898,7 @@ class AutoSubmitter:
         content = changes_file.read_text(encoding="utf-8", errors="ignore")
         _log_head(changes_file, content, 50)
 
-        success = True
-        for target in self.targets:
-            if target == "none" or not target:
-                continue
-            if self.has_pending_submission(package, target):
-                continue
-
-            log.info("## Ready to submit %s to %s ##", package, target)
-            git_branch = git_branches.get(target)
-            if git_branch:
-                git_dir = self.dir / "git-repos"
-                if not self.dry_run:
-                    git_dir.mkdir(exist_ok=True)
-                    os.chdir(git_dir)
-
-                res_submit = self.make_git_submit_request(
-                    package=package,
-                    version=version,
-                    branch=git_branch,
-                )
-            else:
-                dst_dir = self.dir / self.dst_project / package
-                os.chdir(dst_dir)
-
-                res_submit = self.make_obs_submit_request(
-                    package=package,
-                    target=target,
-                    version=version,
-                )
-
-            if not res_submit:
-                success = False
-                self.failed_packages.append(package)
-
-        return success
+        return self._create_submit_requests(package, version)
 
     def _is_package_up_to_date(self, package: str) -> bool:
         """Check if package is already up to date on target."""
