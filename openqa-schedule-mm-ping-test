@@ -26,7 +26,7 @@ machines:
   {machine}:
     backend: qemu
     settings:
-      WORKER_CLASS: qemu_x86_64,tap
+      WORKER_CLASS: {worker_class}
       UEFI: '1'
 
 .common: &common
@@ -75,6 +75,9 @@ def main(  # ruff: ignore[too-many-arguments]
         str, typer.Option(envvar="build_regex", help="Regex a passed job's BUILD must match.")
     ] = r"^[0-9]+$",
     machine: Annotated[str, typer.Option(envvar="machine")] = "uefi",
+    worker_class: Annotated[
+        str | None, typer.Option(envvar="worker_class", help="Worker classes to test, defaults to 'qemu_<arch>,tap'.")
+    ] = None,
     monitor: Annotated[bool, typer.Option("--monitor/--no-monitor", help="Monitor jobs until completion.")] = True,
     follow: Annotated[bool, typer.Option("--follow/--no-follow", help="Follow jobs if restarted or cloned.")] = True,
     poll_interval: Annotated[
@@ -139,7 +142,12 @@ def main(  # ruff: ignore[too-many-arguments]
         cmd.append("--follow")
 
     scenario_yaml = SCENARIO_YAML.format(
-        distri=distri, flavor_override=flavor_override, arch=arch, version=version, machine=machine
+        distri=distri,
+        flavor_override=flavor_override,
+        arch=arch,
+        version=version,
+        machine=machine,
+        worker_class=worker_class or f"qemu_{arch},tap",
     )
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".yaml") as scenario_file:
         scenario_file.write(scenario_yaml)
