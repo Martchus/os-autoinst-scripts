@@ -291,26 +291,20 @@ def diff_text_has_single_added_block(diff_text: str) -> bool:
     # The new entry is usually added starting at line 1 (+...). However, because both the old
     # and new changelogs begin with a separator line (-----------------------------------),
     # some diff implementations match line 1 as an unchanged context line and place the
-    # added block starting at line 2. We accept this as long as line 1 is an unchanged separator
-    # and line 2 immediately begins the added block.
-    if hunk_lines[0].startswith("+"):
-        start_index = 0
-    elif (
-        not hunk_lines[0].startswith(("-", "+", "@@"))
-        and re.match(r"^-{20,}$", hunk_lines[0].strip())
-        and len(hunk_lines) > 1
-        and hunk_lines[1].startswith("+")
-    ):
-        start_index = 1
-    else:
+    # added block starting at line 2. If line 1 is an unchanged separator context line,
+    # we strip it so that the remaining lines must strictly start with the added block.
+    if not hunk_lines[0].startswith(("-", "+", "@@")) and re.match(r"^-{20,}$", hunk_lines[0].strip()):
+        hunk_lines = hunk_lines[1:]
+
+    # The very first line of the addition block must start with '+'
+    if not hunk_lines or not hunk_lines[0].startswith("+"):
         return False
 
     # Skip the contiguous block of added lines
-    added_lines = hunk_lines[start_index:]
-    context_index = next((i for i, line in enumerate(added_lines) if not line.startswith("+")), len(added_lines))
+    context_index = next((i for i, line in enumerate(hunk_lines) if not line.startswith("+")), len(hunk_lines))
 
     # Remaining lines (if any) are context lines and must not contain any additions, deletions, or new hunks
-    return not any(line.startswith(("+", "-", "@@")) for line in added_lines[context_index:])
+    return not any(line.startswith(("+", "-", "@@")) for line in hunk_lines[context_index:])
 
 
 def diff_has_single_added_block(diff_cmd: list[str]) -> tuple[bool, str]:

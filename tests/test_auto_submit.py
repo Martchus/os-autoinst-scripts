@@ -754,6 +754,56 @@ def test_diff_text_has_single_added_block() -> None:
  - Update to version 5.1787133330.4deef227:"""
     assert auto_submit.diff_text_has_single_added_block(valid_osc_diff_with_separator_on_top) is True
 
+    # Valid diff with only a single added line at line 1
+    valid_single_line_diff = """--- pkg.changes\t2026-10-21 10:00:00.000000000 +0000
++++ pkg.changes\t2026-10-21 11:00:00.000000000 +0000
+@@ -1,3 +1,4 @@
++Single added line
+ -------------------------------------------------------------------
+ Wed Oct 14 10:00:00 UTC 2026 - developer@example.com
+"""
+    assert auto_submit.diff_text_has_single_added_block(valid_single_line_diff) is True
+
+    # Invalid: line 1 is addition (+), line 2 is immediate deletion (-)
+    diff_deletion_after_first_line = """--- pkg.changes
++++ pkg.changes
+@@ -1,3 +1,3 @@
++New entry line
+-Historical line removed
+ -------------------------------------------------------------------
+"""
+    assert auto_submit.diff_text_has_single_added_block(diff_deletion_after_first_line) is False
+
+    # Invalid: line 1 is addition (+), line 2 is context ( ), line 3 is addition (+)
+    diff_context_at_line_2 = """--- pkg.changes
++++ pkg.changes
+@@ -1,3 +1,4 @@
++New entry line 1
+ -------------------------------------------------------------------
++New entry line 2
+"""
+    assert auto_submit.diff_text_has_single_added_block(diff_context_at_line_2) is False
+
+    # Invalid: line 1 is separator context, followed immediately by deletion (-)
+    diff_separator_followed_by_deletion = """--- pkg.changes
++++ pkg.changes
+@@ -1,3 +1,3 @@
+ -------------------------------------------------------------------
+-Historical line removed
++New entry line
+"""
+    assert auto_submit.diff_text_has_single_added_block(diff_separator_followed_by_deletion) is False
+
+    # Invalid: line 1 is separator context, line 2 is addition (+), line 3 is deletion (-)
+    diff_separator_addition_then_deletion = """--- pkg.changes
++++ pkg.changes
+@@ -1,3 +1,3 @@
+ -------------------------------------------------------------------
++New entry line
+-Historical line removed
+"""
+    assert auto_submit.diff_text_has_single_added_block(diff_separator_addition_then_deletion) is False
+
     # Invalid: addition is not at line 1 (e.g. added in the middle of the file)
     diff_added_in_middle = """--- pkg.changes
 +++ pkg.changes
