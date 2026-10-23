@@ -36,6 +36,14 @@ class CommitResult(Enum):
     NO_CHANGES = "no_changes"
 
 
+class SubmitError(Exception):
+    """Exception raised when submitting changes for a package fails."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 log = logging.getLogger(__name__)
 
 # Target-specific mappings
@@ -416,7 +424,7 @@ class AutoSubmitter:
         package: str,
         target: str,
         version: str,
-    ) -> bool:
+    ) -> None:
         """Create an OBS submit request."""
         req = get_obs_sr_id(target, self.dst_project, package, self.osc_cmd_str, dry_run=self.dry_run)
         cmd = [*shlex.split(self.osc_cmd_str), "sr"]
@@ -426,11 +434,10 @@ class AutoSubmitter:
 
         try:
             run_osc_cmd(cmd, dry_run=self.dry_run, mutating=True)
-        except subprocess.CalledProcessError:
+        except subprocess.CalledProcessError as e:
             log.exception("make_obs_submit_request failed")
-            return False
-        else:
-            return True
+            msg = f"Unable to call osc: {e}"
+            raise SubmitError(msg) from e
 
     def _fork_and_clone_repo(self, package: str) -> str:
         """Fork and clone the target repository."""
@@ -467,7 +474,7 @@ class AutoSubmitter:
                 return ""
         return forked_repo
 
-    def _prepare_local_clone(self, package: str, branch: str) -> bool:
+    def _prepare_local_clone(self, package: str, branch: str) -> None:
         """Prepare local clone with files from original directory."""
         git_cmd = shlex.split(self.git_cmd_str)
         # "parent" remote is added by git-obs; fetch before switch because the
@@ -491,10 +498,8 @@ class AutoSubmitter:
             # Ensure the changelog diff against parent branch only has one new block at the beginning.
             diff_ok, output = diff_has_single_added_block(diff_cmd)
             if not diff_ok:
-                log.warning("git diff for %s.changes does not look ok:\n%s", package, output)
-                return False
-
-        return True
+                msg = f"git diff for {package}.changes does not look ok:\n{output}"
+                raise SubmitError(msg)
 
     def _fetch_lfs_objects(self, branch: str) -> None:
         """Fetch necessary Git LFS objects from parent before pushing."""
@@ -583,7 +588,7 @@ class AutoSubmitter:
             _run_cmd(commit_cmd, check=True)
             _run_cmd(push_cmd, check=True)
 
-    def _create_pull_request(self, title: str, description: str, branch: str) -> bool:
+    def _create_pull_request(self, title: str, description: str, branch: str) -> None:
         """Create pull request with retry logic."""
         git_obs_no_retry_cmd = shlex.split(self.git_obs_no_retry_cmd_str)
         pr_cmd = [
@@ -598,7 +603,7 @@ class AutoSubmitter:
         ]
         if self.dry_run:
             log.info("[dry-run] Would execute: %s", " ".join(pr_cmd))
-            return True
+            return
 
         sleep_time = 3
         remaining_attempts = 4
@@ -612,34 +617,33 @@ class AutoSubmitter:
                 break
             remaining_attempts -= 1
             if remaining_attempts < 1:
-                log.error("Failed to create PR after multiple attempts.")
-                return False
+                msg = "Failed to create PR after multiple attempts."
+                raise SubmitError(msg)
             log.info("Retrying up to %d more times after sleeping %d s ...", remaining_attempts, sleep_time)
             time.sleep(sleep_time)
             sleep_time *= 2
-        return True
 
     def make_git_submit_request(
         self,
         package: str,
         version: str,
         branch: str,
-    ) -> bool:
+    ) -> None:
         """Create a Gitea pull request."""
         title = f"Update to {version}"
         description = "Automatic submission via https://github.com/os-autoinst/os-autoinst-scripts/blob/master/os-autoinst-obs-auto-submit"
 
         forked_repo = self._fork_and_clone_repo(package)
         if not forked_repo:
-            return False
+            msg = f"Failed to fork or clone {package}"
+            raise SubmitError(msg)
 
         if not self.dry_run:
             os.chdir(package)
 
-        if not self._prepare_local_clone(package, branch):
-            return False
+        self._prepare_local_clone(package, branch)
         self._commit_and_push(title, branch)
-        return self._create_pull_request(title, description, branch)
+        self._create_pull_request(title, description, branch)
 
     def has_pending_submission(  # ruff: ignore[complex-structure]
         self,
@@ -837,24 +841,26 @@ class AutoSubmitter:
                 if not self.dry_run:
                     git_dir.mkdir(exist_ok=True)
                     os.chdir(git_dir)
-
-                res_submit = self.make_git_submit_request(
-                    package=package,
-                    version=version,
-                    branch=git_branch,
-                )
             else:
                 dst_dir = self.dir / self.dst_project / package
                 os.chdir(dst_dir)
-
-                res_submit = self.make_obs_submit_request(
-                    package=package,
-                    target=target,
-                    version=version,
-                )
-            if not res_submit:
-                success = False
+            try:
+                if git_branch:
+                    self.make_git_submit_request(
+                        package=package,
+                        version=version,
+                        branch=git_branch,
+                    )
+                else:
+                    self.make_obs_submit_request(
+                        package=package,
+                        target=target,
+                        version=version,
+                    )
+            except SubmitError as e:
                 self.failed_packages.append(package)
+                log.exception("Unable to submit package %s to %s: %s", package, target, e.message)
+                success = False
         return success
 
     def update_package(

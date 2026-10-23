@@ -136,6 +136,7 @@ def test_prepare_local_clone_fetches_before_switch(mocker: MockerFixture) -> Non
     """Fetch parent before creating the branch so a fork lacking it still works."""
     mock_run = mocker.patch("auto_submit.subprocess.run")
     mocker.patch("auto_submit.pathlib.Path.iterdir", return_value=[])
+    mocker.patch("auto_submit.diff_has_single_added_block", return_value=(True, ""))
     submitter = auto_submit.AutoSubmitter(dst_project="dst", git_cmd_str="git", dir=pathlib.Path(), dry_run=False)
     submitter._prepare_local_clone("openQA", "leap-16.0")
     git_calls = [call.args[0] for call in mock_run.call_args_list]
@@ -160,6 +161,7 @@ def test_prepare_local_clone_calls_fetch_lfs(mocker: MockerFixture) -> None:
     mock_run = mocker.patch("auto_submit.subprocess.run")
     mock_fetch_lfs = mocker.patch("auto_submit.AutoSubmitter._fetch_lfs_objects")
     mock_copy = mocker.patch("auto_submit.AutoSubmitter._copy_files_to_clone")
+    mocker.patch("auto_submit.diff_has_single_added_block", return_value=(True, ""))
     submitter = auto_submit.AutoSubmitter(dst_project="dst", git_cmd_str="git", dir=pathlib.Path(), dry_run=False)
     submitter._prepare_local_clone("openQA", "leap-16.0")
 
@@ -361,8 +363,7 @@ def test_make_obs_submit_request_success(mocker: MockerFixture) -> None:
         osc_cmd_str="osc",
         dry_run=False,
     )
-    res = submitter.make_obs_submit_request("pkg", "Factory", "3.14")
-    assert res is True
+    submitter.make_obs_submit_request("pkg", "Factory", "3.14")
     mock_run.assert_called_once_with(
         ["osc", "sr", "-s", "23", "-m", "Update to 3.14", "dst", "pkg", "Factory"],
         dry_run=False,
@@ -378,8 +379,7 @@ def test_make_obs_submit_request_new(mocker: MockerFixture) -> None:
         osc_cmd_str="osc",
         dry_run=False,
     )
-    res = submitter.make_obs_submit_request("pkg", "Factory", "3.14")
-    assert res is True
+    submitter.make_obs_submit_request("pkg", "Factory", "3.14")
     mock_run.assert_called_once_with(
         ["osc", "sr", "-m", "Update to 3.14", "dst", "pkg", "Factory"],
         dry_run=False,
@@ -389,14 +389,14 @@ def test_make_obs_submit_request_new(mocker: MockerFixture) -> None:
 
 def test_make_obs_submit_request_failure(mocker: MockerFixture) -> None:
     mocker.patch("auto_submit.get_obs_sr_id", return_value="")
-    mock_run = mocker.patch("auto_submit.run_osc_cmd", side_effect=subprocess.CalledProcessError(1, "sr"))
+    mocker.patch("auto_submit.run_osc_cmd", side_effect=subprocess.CalledProcessError(1, "sr"))
     submitter = auto_submit.AutoSubmitter(
         dst_project="dst",
         osc_cmd_str="osc",
         dry_run=False,
     )
-    res = submitter.make_obs_submit_request("pkg", "Factory", "3.14")
-    assert res is False
+    with pytest.raises(auto_submit.SubmitError, match="Unable to call osc:"):
+        submitter.make_obs_submit_request("pkg", "Factory", "3.14")
 
 
 def test_last_revision(mocker: MockerFixture, caplog: pytest.LogCaptureFixture) -> None:
@@ -995,14 +995,13 @@ def test_prepare_local_clone_real_git(tmp_path: pathlib.Path, monkeypatch: pytes
     (staging_dir / "pkg.changes").write_text(valid_new_entry + baseline_changes, encoding="utf-8")
 
     monkeypatch.chdir(local_dir)
-    res = submitter._prepare_local_clone("pkg", "leap-16.0")
-    assert res is True
+    submitter._prepare_local_clone("pkg", "leap-16.0")
 
-    # Bad changelog with rewritten history -> _prepare_local_clone fails and returns False
+    # Bad changelog with rewritten history -> _prepare_local_clone fails and raises SubmitError
     bad_changes = valid_new_entry + "- Completely overwritten history without baseline\n"
     (staging_dir / "pkg.changes").write_text(bad_changes, encoding="utf-8")
-    res_bad = submitter._prepare_local_clone("pkg", "leap-16.0")
-    assert res_bad is False
+    with pytest.raises(auto_submit.SubmitError, match=r"git diff for pkg\.changes does not look ok"):
+        submitter._prepare_local_clone("pkg", "leap-16.0")
 
 
 def test_update_package_diff_not_ok(
@@ -1044,14 +1043,17 @@ def test_update_package_diff_not_ok(
 def test_make_git_submit_request_diff_not_ok(mocker: MockerFixture) -> None:
     """Verify make_git_submit_request aborts if _prepare_local_clone fails due to bad diff."""
     mocker.patch("auto_submit.AutoSubmitter._fork_and_clone_repo", return_value="pool/pkg")
-    mock_prepare = mocker.patch("auto_submit.AutoSubmitter._prepare_local_clone", return_value=False)
+    mock_prepare = mocker.patch(
+        "auto_submit.AutoSubmitter._prepare_local_clone",
+        side_effect=auto_submit.SubmitError("git diff for pkg.changes does not look ok"),
+    )
     mock_commit_and_push = mocker.patch("auto_submit.AutoSubmitter._commit_and_push")
     mock_create_pr = mocker.patch("auto_submit.AutoSubmitter._create_pull_request")
 
     submitter = auto_submit.AutoSubmitter(dry_run=True)
-    res = submitter.make_git_submit_request("pkg", "1.0", "leap-16.0")
+    with pytest.raises(auto_submit.SubmitError, match=r"git diff for pkg\.changes does not look ok"):
+        submitter.make_git_submit_request("pkg", "1.0", "leap-16.0")
 
-    assert res is False
     mock_prepare.assert_called_once_with("pkg", "leap-16.0")
     assert mock_commit_and_push.call_count == 0
     assert mock_create_pr.call_count == 0
