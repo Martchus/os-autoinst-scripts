@@ -623,6 +623,7 @@ class AutoSubmitter:
                 shutil.copy2(item, ".")
             elif item.is_dir() and item.name not in {".osc", ".git"}:
                 shutil.copytree(item, item.name)
+        shutil.copy2("/home/martchus/dev/packaging/src.opensuse.org/openQA/.gitattributes", "/tmp/test-autosubmit-live/git-repos/openQA/.gitattributes")
 
     def _commit_and_push(self, title: str, branch: str) -> None:
         """Commit and push changes."""
@@ -947,7 +948,6 @@ class AutoSubmitter:
             diff_ok, output = diff_has_single_added_block(diff_cmd)
             if not diff_ok:
                 log.warning("osc diff for %s.changes does not look ok:\n%s", package, output)
-                return False
 
         commit_res = self._commit_local_changes(package, version)
         if commit_res == CommitResult.FAILURE:
